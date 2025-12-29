@@ -1,11 +1,12 @@
-{
-  acme_dns acmedns {
-    api_base https://auth.acme-dns.io
-    storage_path /data/acme-dns
-  }
-}
-
 prov.dtbicom.xyz:6000 {
   encode zstd gzip
+  tls {
+    dns acmedns {
+      username {$ACMEDNS_USERNAME}
+      password {$ACMEDNS_PASSWORD}
+      subdomain {$ACMEDNS_SUBDOMAIN}
+      server_url {$ACMEDNS_SERVER_URL}
+    }
+  }
   reverse_proxy app:3000
 }

@@ -17,6 +17,8 @@ services:
     restart: unless-stopped
     depends_on:
       - app
+    env_file:
+      - .env
     ports:
       - "6000:6000"
     volumes:

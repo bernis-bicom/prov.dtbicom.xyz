@@ -30,12 +30,47 @@ docker compose up -d --build
 ## HTTPS on port 6000 (acme-dns)
 
 This stack ships with a custom Caddy build that includes the acme-dns module.
-It can issue certs via DNS-01, so you do not need ports 80/443 open.
+It issues certs via DNS-01, so you do not need ports 80/443 open.
 
-1. Configure an acme-dns account for `prov.dtbicom.xyz` and set the required
-   CNAME record in DNS.
-2. If you use a different acme-dns endpoint, update `api_base` in `Caddyfile`.
-3. Start the stack; Caddy stores acme-dns registration data in `/data/acme-dns`.
+### Step 1: Register with acme-dns
+
+```bash
+curl -X POST https://auth.acme-dns.io/register
+```
+
+Save the JSON response values: `username`, `password`, `subdomain`,
+`fulldomain`, and `server_url`.
+
+### Step 2: Add the required CNAME
+
+Create this DNS record (replace the values with your response):
+
+```
+_acme-challenge.prov.dtbicom.xyz CNAME <fulldomain>.
+```
+
+Example:
+
+```
+_acme-challenge.prov.dtbicom.xyz CNAME 37c5...e2ab.auth.acme-dns.io.
+```
+
+### Step 3: Add credentials to .env
+
+Set these in `.env`:
+
+```
+ACMEDNS_USERNAME=<username>
+ACMEDNS_PASSWORD=<password>
+ACMEDNS_SUBDOMAIN=<subdomain>
+ACMEDNS_SERVER_URL=<server_url>
+```
+
+Then restart Caddy:
+
+```bash
+docker compose restart caddy
+```
 
 Note: because HTTPS is on port 6000, users must include the port in the URL.
 
@@ -62,6 +97,10 @@ Note: because HTTPS is on port 6000, users must include the port in the URL.
 - `COOKIE_SECURE`: `1` to force secure cookies (default: production only).
 - `DB_PATH`: SQLite database location (default `/data/provisioning.db`).
 - `PORT`: internal app port (default `3000`).
+- `ACMEDNS_USERNAME`: acme-dns username.
+- `ACMEDNS_PASSWORD`: acme-dns password.
+- `ACMEDNS_SUBDOMAIN`: acme-dns subdomain.
+- `ACMEDNS_SERVER_URL`: acme-dns API URL.
 
 ## Data storage
 
