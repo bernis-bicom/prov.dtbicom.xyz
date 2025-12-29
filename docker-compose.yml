@@ -5,10 +5,11 @@ services:
     env_file:
       - .env
     environment:
+      PORT: "6001"
       DB_PATH: /data/provisioning.db
       COOKIE_SECURE: "1"
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:6001:6001"
     volumes:
       - prov-data:/data
 

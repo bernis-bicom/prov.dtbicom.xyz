@@ -28,7 +28,7 @@ docker compose up -d --build
 4. Visit `https://prov.dtbicom.xyz:6000/admin` and log in.
 
 Note: Caddy uses host networking to avoid Docker egress blocks. The app is
-bound to `127.0.0.1:3000` on the host, while HTTPS listens on port 6000.
+bound to `127.0.0.1:6001` on the host, while HTTPS listens on port 6000.
 
 ## HTTPS on port 6000 (acme-dns)
 
@@ -99,7 +99,7 @@ Note: because HTTPS is on port 6000, users must include the port in the URL.
 - `SESSION_COOKIE`: cookie name (default `prov_session`).
 - `COOKIE_SECURE`: `1` to force secure cookies (default: production only).
 - `DB_PATH`: SQLite database location (default `/data/provisioning.db`).
-- `PORT`: internal app port (default `3000`).
+- `PORT`: internal app port (default `3000`, set to `6001` in Docker).
 - `ACMEDNS_USERNAME`: acme-dns username.
 - `ACMEDNS_PASSWORD`: acme-dns password.
 - `ACMEDNS_SUBDOMAIN`: acme-dns subdomain.
@@ -117,4 +117,5 @@ npm install
 npm run dev
 ```
 
-App runs on `http://localhost:3000`.
+App runs on `http://localhost:3000` by default; set `PORT=6001` if you want
+to mirror the Docker setup.
