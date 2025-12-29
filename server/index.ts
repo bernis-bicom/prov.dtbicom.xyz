@@ -630,7 +630,7 @@ app.get("/admin", (request, response) => {
     typeof request.query.error === "string" ? request.query.error : null;
   const noticeParam =
     typeof request.query.notice === "string" ? request.query.notice : null;
-  const message = errorParam
+  const message: NoticeMessage | null = errorParam
     ? { type: "error", text: errorParam }
     : noticeParam
       ? { type: "success", text: noticeParam }
