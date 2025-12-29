@@ -7,7 +7,7 @@ Touchless provisioning server for Yealink devices with a simple admin UI.
 - Admin UI at `/admin` with login + session cookies
 - SQLite-backed storage for PBX servers and device credentials
 - Dynamic Yealink config endpoint at `/yealink/{mac}.cfg`
-- Dockerized with Caddy reverse proxy
+- Dockerized with Caddy reverse proxy (HTTPS on port 6000)
 
 ## Quick start (Docker + Caddy)
 
@@ -25,15 +25,27 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-4. Visit `https://prov.dtbicom.xyz/admin` and log in.
+4. Visit `https://prov.dtbicom.xyz:6000/admin` and log in.
+
+## HTTPS on port 6000 (acme-dns)
+
+This stack ships with a custom Caddy build that includes the acme-dns module.
+It can issue certs via DNS-01, so you do not need ports 80/443 open.
+
+1. Configure an acme-dns account for `prov.dtbicom.xyz` and set the required
+   CNAME record in DNS.
+2. If you use a different acme-dns endpoint, update `api_base` in `Caddyfile`.
+3. Start the stack; Caddy stores acme-dns registration data in `/data/acme-dns`.
+
+Note: because HTTPS is on port 6000, users must include the port in the URL.
 
 ## Yealink RPS setup
 
 - In Yealink RPS, set the provisioning URL to:
-  `https://prov.dtbicom.xyz/yealink/`
+  `https://prov.dtbicom.xyz:6000/yealink/`
 - The phone will request `${MAC}.cfg` automatically.
 - Example resolved URL:
-  `https://prov.dtbicom.xyz/yealink/001122334455.cfg`
+  `https://prov.dtbicom.xyz:6000/yealink/001122334455.cfg`
 
 ## Admin workflow
 
@@ -64,4 +76,3 @@ npm run dev
 ```
 
 App runs on `http://localhost:3000`.
-# prov.dtbicom.xyz

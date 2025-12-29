@@ -1,4 +1,11 @@
-prov.dtbicom.xyz {
+{
+  acme_dns acmedns {
+    api_base https://auth.acme-dns.io
+    storage_path /data/acme-dns
+  }
+}
+
+prov.dtbicom.xyz:6000 {
   encode zstd gzip
   reverse_proxy app:3000
 }

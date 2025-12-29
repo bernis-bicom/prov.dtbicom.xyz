@@ -11,13 +11,14 @@ services:
       - prov-data:/data
 
   caddy:
-    image: caddy:2
+    build:
+      context: .
+      dockerfile: Caddy.Dockerfile
     restart: unless-stopped
     depends_on:
       - app
     ports:
-      - "80:80"
-      - "443:443"
+      - "6000:6000"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
