@@ -1,4 +1,4 @@
-prov.dtbicom.xyz:6000 {
+prov.dtbicom.xyz:8443 {
   encode zstd gzip
   tls {
     dns acmedns {
