@@ -27,6 +27,8 @@ docker compose up -d --build
 
 4. Visit `https://prov.dtbicom.xyz:8443/admin` and log in.
 
+Note: Docker builds run `npm run typecheck` and `npm test` before compiling.
+
 Note: Caddy uses host networking to avoid Docker egress blocks. The app is
 bound to `127.0.0.1:6001` on the host, while HTTPS listens on port 8443.
 
@@ -119,3 +121,13 @@ npm run dev
 
 App runs on `http://localhost:3000` by default; set `PORT=6001` if you want
 to mirror the Docker setup.
+
+## TypeScript and tests
+
+Strict TypeScript is enabled. Useful commands:
+
+```bash
+npm run typecheck
+npm run build
+npm test
+```

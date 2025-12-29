@@ -1,4 +1,4 @@
-FROM node:20-bullseye-slim
+FROM node:20-bullseye-slim AS builder
 
 WORKDIR /app
 
@@ -7,9 +7,19 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json ./
-RUN npm install --omit=dev
+RUN npm install
 
 COPY . ./
+RUN npm run typecheck && npm test && npm run build
+
+FROM node:20-bullseye-slim
+
+WORKDIR /app
+
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/package.json ./package.json
 
 RUN mkdir -p /data \
   && chown -R node:node /app /data
@@ -22,4 +32,4 @@ ENV NODE_ENV=production \
 
 EXPOSE 3000
 
-CMD ["node", "server/index.js"]
+CMD ["node", "dist/server/index.js"]

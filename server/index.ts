@@ -5,8 +5,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
+import type { NextFunction, Request, Response } from "express";
+import {
+  formatMac,
+  normalizeMac,
+  normalizeTransport,
+  parseInteger,
+  renderYealinkConfig,
+} from "./lib.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const currentDir = path.dirname(fileURLToPath(import.meta.url));
+const isDistBuild = currentDir.split(path.sep).includes("dist");
+const projectRoot = path.resolve(currentDir, isDistBuild ? "../.." : "..");
 
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 const ADMIN_USER = process.env.ADMIN_USER || "admin";
@@ -20,7 +30,7 @@ const COOKIE_SECURE = process.env.COOKIE_SECURE
   ? process.env.COOKIE_SECURE === "1"
   : process.env.NODE_ENV === "production";
 const DB_PATH =
-  process.env.DB_PATH || path.join(__dirname, "..", "data", "provisioning.db");
+  process.env.DB_PATH || path.join(projectRoot, "data", "provisioning.db");
 
 const dataDir = path.dirname(DB_PATH);
 if (!fs.existsSync(dataDir)) {
@@ -65,6 +75,55 @@ db.exec(`
     expires_at TEXT NOT NULL
   );
 `);
+
+type PbxServer = {
+  id: number;
+  name: string;
+  host: string;
+  port: number;
+  transport: string;
+  outbound_proxy_host: string | null;
+  outbound_proxy_port: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type Device = {
+  id: number;
+  mac: string;
+  label: string | null;
+  extension: string;
+  auth_user: string;
+  auth_pass: string;
+  display_name: string | null;
+  pbx_server_id: number;
+  line_number: number;
+  created_at: string;
+  updated_at: string;
+};
+
+type DeviceWithPbx = Device & {
+  pbx_name: string;
+  pbx_host: string;
+  pbx_port: number;
+  pbx_transport: string;
+  pbx_proxy_host: string | null;
+  pbx_proxy_port: number | null;
+};
+
+type SessionRow = {
+  id: number;
+  token: string;
+  created_at: string;
+  expires_at: string;
+};
+
+type NoticeMessage = {
+  type: "success" | "error";
+  text: string;
+};
+
+type RequestWithSession = Request & { session?: SessionRow };
 
 const statements = {
   listPbx: db.prepare(
@@ -136,62 +195,32 @@ const app = express();
 app.set("trust proxy", true);
 app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser());
-app.use("/assets", express.static(path.join(__dirname, "..", "public")));
+app.use("/assets", express.static(path.join(projectRoot, "public")));
 
 if (ADMIN_PASS === "change-me") {
   console.warn("ADMIN_PASS is set to the default; update it before production use.");
 }
 
-const transports = new Map([
-  ["udp", 0],
-  ["tcp", 1],
-  ["tls", 2],
-]);
-
-function normalizeMac(input) {
-  const cleaned = String(input || "")
-    .toLowerCase()
-    .replace(/[^a-f0-9]/g, "");
-  if (cleaned.length !== 12) return null;
-  return cleaned;
-}
-
-function formatMac(mac) {
-  const normalized = normalizeMac(mac);
-  if (!normalized) return "";
-  return normalized.match(/.{2}/g).join(":");
-}
-
-function escapeHtml(value) {
+function escapeHtml(value: unknown): string {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/\"/g, "&quot;")
+    .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
 
-function sanitizeConfigValue(value) {
-  return String(value ?? "").replace(/[\r\n]/g, " ").trim();
-}
-
-function parseInteger(value, fallback) {
-  const parsed = Number.parseInt(value, 10);
-  return Number.isNaN(parsed) ? fallback : parsed;
-}
-
-function normalizeTransport(value) {
-  const key = String(value || "udp").toLowerCase();
-  return transports.has(key) ? key : null;
-}
-
-function buildNoticeUrl(baseUrl, kind, message) {
+function buildNoticeUrl(
+  baseUrl: string,
+  kind: "error" | "notice",
+  message: string
+): string {
   const url = new URL(baseUrl, "http://localhost");
   url.searchParams.set(kind, message);
   return url.pathname + url.search;
 }
 
-function createSession() {
+function createSession(): { token: string; expiresAt: Date } {
   const token = crypto.randomBytes(24).toString("hex");
   const now = new Date();
   const expiresAt = new Date(
@@ -205,10 +234,11 @@ function createSession() {
   return { token, expiresAt };
 }
 
-function getSession(request) {
-  const token = request.cookies?.[SESSION_COOKIE];
+function getSession(request: Request): SessionRow | null {
+  const cookies = request.cookies as Record<string, string> | undefined;
+  const token = cookies?.[SESSION_COOKIE];
   if (!token) return null;
-  const session = statements.getSession.get(token);
+  const session = statements.getSession.get(token) as SessionRow | undefined;
   if (!session) return null;
   if (new Date(session.expires_at) <= new Date()) {
     statements.deleteSession.run(token);
@@ -217,17 +247,31 @@ function getSession(request) {
   return session;
 }
 
-function requireAuth(request, response, next) {
+function requireAuth(
+  request: Request,
+  response: Response,
+  next: NextFunction
+): void {
   const session = getSession(request);
   if (session) {
-    request.session = session;
+    (request as RequestWithSession).session = session;
     next();
     return;
   }
   response.redirect("/admin");
 }
 
-function renderLayout({ title, bodyClass, content, message }) {
+function renderLayout({
+  title,
+  bodyClass,
+  content,
+  message,
+}: {
+  title: string;
+  bodyClass: string;
+  content: string;
+  message: NoticeMessage | null;
+}): string {
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -250,7 +294,11 @@ function renderLayout({ title, bodyClass, content, message }) {
 </html>`;
 }
 
-function renderLoginPage({ message }) {
+function renderLoginPage({
+  message,
+}: {
+  message: NoticeMessage | null;
+}): string {
   const content = `
     <main class="shell login-shell">
       <section class="card login-card reveal">
@@ -282,8 +330,19 @@ function renderLoginPage({ message }) {
   });
 }
 
-function renderAdminPage({ request, pbxServers, devices, message }) {
-  const baseUrl = `${request.protocol}://${request.get("host")}`;
+function renderAdminPage({
+  request,
+  pbxServers,
+  devices,
+  message,
+}: {
+  request: Request;
+  pbxServers: PbxServer[];
+  devices: DeviceWithPbx[];
+  message: NoticeMessage | null;
+}): string {
+  const host = request.get("host") ?? "localhost";
+  const baseUrl = `${request.protocol}://${host}`;
   const provisionPattern = `${baseUrl}/yealink/{mac}.cfg`;
   const pbxOptions = pbxServers
     .map(
@@ -551,53 +610,6 @@ function renderAdminPage({ request, pbxServers, devices, message }) {
   });
 }
 
-function renderYealinkConfig(device) {
-  const line = device.line_number || 1;
-  const label = sanitizeConfigValue(device.label || device.extension);
-  const displayName = sanitizeConfigValue(
-    device.display_name || device.label || device.extension
-  );
-  const userName = sanitizeConfigValue(device.extension);
-  const authName = sanitizeConfigValue(device.auth_user);
-  const password = sanitizeConfigValue(device.auth_pass);
-  const serverHost = sanitizeConfigValue(device.pbx_host);
-  const serverPort = parseInteger(device.pbx_port, 5060);
-  const transportKey = normalizeTransport(device.pbx_transport) || "udp";
-  const transportValue = transports.get(transportKey);
-
-  const lines = [
-    "#!version:1.0.0.1",
-    `account.${line}.enable = 1`,
-    `account.${line}.label = ${label}`,
-    `account.${line}.display_name = ${displayName}`,
-    `account.${line}.user_name = ${userName}`,
-    `account.${line}.auth_name = ${authName}`,
-    `account.${line}.password = ${password}`,
-    `account.${line}.sip_server.1.address = ${serverHost}`,
-    `account.${line}.sip_server.1.port = ${serverPort}`,
-    `account.${line}.transport = ${transportValue}`,
-  ];
-
-  if (device.pbx_proxy_host) {
-    lines.push(`account.${line}.outbound_proxy_enable = 1`);
-    lines.push(
-      `account.${line}.outbound_proxy.1.address = ${sanitizeConfigValue(
-        device.pbx_proxy_host
-      )}`
-    );
-    if (device.pbx_proxy_port) {
-      lines.push(
-        `account.${line}.outbound_proxy.1.port = ${parseInteger(
-          device.pbx_proxy_port,
-          5060
-        )}`
-      );
-    }
-  }
-
-  return lines.join("\n") + "\n";
-}
-
 function cleanupSessions() {
   statements.deleteExpiredSessions.run(new Date().toISOString());
 }
@@ -614,10 +626,14 @@ app.get("/", (_request, response) => {
 
 app.get("/admin", (request, response) => {
   const session = getSession(request);
-  const message = request.query.error
-    ? { type: "error", text: String(request.query.error) }
-    : request.query.notice
-      ? { type: "success", text: String(request.query.notice) }
+  const errorParam =
+    typeof request.query.error === "string" ? request.query.error : null;
+  const noticeParam =
+    typeof request.query.notice === "string" ? request.query.notice : null;
+  const message = errorParam
+    ? { type: "error", text: errorParam }
+    : noticeParam
+      ? { type: "success", text: noticeParam }
       : null;
 
   if (!session) {
@@ -625,8 +641,8 @@ app.get("/admin", (request, response) => {
     return;
   }
 
-  const pbxServers = statements.listPbx.all();
-  const devices = statements.listDevices.all();
+  const pbxServers = statements.listPbx.all() as PbxServer[];
+  const devices = statements.listDevices.all() as DeviceWithPbx[];
   response.send(
     renderAdminPage({ request, pbxServers, devices, message })
   );
@@ -646,13 +662,14 @@ app.post("/admin/login", (request, response) => {
     httpOnly: true,
     sameSite: "lax",
     secure: COOKIE_SECURE,
-    expires: new Date(session.expires_at),
+    expires: session.expiresAt,
   });
   response.redirect(buildNoticeUrl("/admin", "notice", "Welcome back."));
 });
 
 app.post("/admin/logout", requireAuth, (request, response) => {
-  const token = request.cookies?.[SESSION_COOKIE];
+  const cookies = request.cookies as Record<string, string> | undefined;
+  const token = cookies?.[SESSION_COOKIE];
   if (token) {
     statements.deleteSession.run(token);
   }
@@ -694,7 +711,7 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
 
 app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
   const id = Number.parseInt(request.params.id, 10);
-  const existing = statements.getPbx.get(id);
+  const existing = statements.getPbx.get(id) as PbxServer | undefined;
   if (!existing) {
     response.redirect(buildNoticeUrl("/admin", "error", "PBX not found."));
     return;
@@ -766,7 +783,7 @@ app.post("/admin/devices", requireAuth, (request, response) => {
     return;
   }
 
-  const pbx = statements.getPbx.get(pbxServerId);
+  const pbx = statements.getPbx.get(pbxServerId) as PbxServer | undefined;
   if (!pbx) {
     response.redirect(
       buildNoticeUrl("/admin", "error", "PBX server not found.")
@@ -800,7 +817,7 @@ app.post("/admin/devices", requireAuth, (request, response) => {
 
 app.post("/admin/devices/:id", requireAuth, (request, response) => {
   const id = Number.parseInt(request.params.id, 10);
-  const existing = statements.getDevice.get(id);
+  const existing = statements.getDevice.get(id) as DeviceWithPbx | undefined;
   if (!existing) {
     response.redirect(buildNoticeUrl("/admin", "error", "Device not found."));
     return;
@@ -830,7 +847,7 @@ app.post("/admin/devices/:id", requireAuth, (request, response) => {
     return;
   }
 
-  const pbx = statements.getPbx.get(pbxServerId);
+  const pbx = statements.getPbx.get(pbxServerId) as PbxServer | undefined;
   if (!pbx) {
     response.redirect(
       buildNoticeUrl("/admin", "error", "PBX server not found.")
@@ -879,7 +896,9 @@ app.get("/yealink/:mac.cfg", (request, response) => {
     return;
   }
 
-  const device = statements.getDeviceByMac.get(normalized);
+  const device = statements.getDeviceByMac.get(normalized) as
+    | DeviceWithPbx
+    | undefined;
   if (!device) {
     response.status(404).send("Not Found");
     return;
