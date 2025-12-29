@@ -27,6 +27,9 @@ docker compose up -d --build
 
 4. Visit `https://prov.dtbicom.xyz:6000/admin` and log in.
 
+Note: Caddy uses host networking to avoid Docker egress blocks. The app is
+bound to `127.0.0.1:3000` on the host, while HTTPS listens on port 6000.
+
 ## HTTPS on port 6000 (acme-dns)
 
 This stack ships with a custom Caddy build that includes the acme-dns module.

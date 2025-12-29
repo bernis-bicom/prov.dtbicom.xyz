@@ -8,5 +8,5 @@ prov.dtbicom.xyz:6000 {
       server_url {$ACMEDNS_SERVER_URL}
     }
   }
-  reverse_proxy app:3000
+  reverse_proxy 127.0.0.1:3000
 }
