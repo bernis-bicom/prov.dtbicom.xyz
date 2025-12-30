@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
-import type { NextFunction, Request, Response } from "express";
+import type { NextFunction, Request, Response as ExpressResponse } from "express";
 import {
   formatMac,
   normalizeMac,
@@ -288,6 +288,76 @@ function normalizeBaseUrl(value: string): string | null {
   }
 }
 
+function md5(value: string): string {
+  return crypto.createHash("md5").update(value).digest("hex");
+}
+
+function parseDigestChallenge(header: string): Record<string, string> | null {
+  const match = header.match(/Digest\s+(.+)/i);
+  if (!match) return null;
+  const params = match[1];
+  const result: Record<string, string> = {};
+  const regex = /(\w+)=(".*?"|[^,]+)(?:,\s*|$)/g;
+  let part: RegExpExecArray | null = null;
+  while ((part = regex.exec(params)) !== null) {
+    const key = part[1];
+    const raw = part[2] ?? "";
+    const value = raw.replace(/^"|"$/g, "");
+    result[key] = value;
+  }
+  return result;
+}
+
+function buildDigestAuthHeader(options: {
+  method: string;
+  url: URL;
+  username: string;
+  password: string;
+  challenge: Record<string, string>;
+}): string | null {
+  const { method, url, username, password, challenge } = options;
+  const realm = challenge.realm;
+  const nonce = challenge.nonce;
+  if (!realm || !nonce) return null;
+  const uri = url.pathname + url.search;
+  const qop = challenge.qop ? challenge.qop.split(",")[0]?.trim() : null;
+  const cnonce = crypto.randomBytes(8).toString("hex");
+  const nc = "00000001";
+  const ha1 = md5(`${username}:${realm}:${password}`);
+  const ha2 = md5(`${method}:${uri}`);
+  const response = qop
+    ? md5(`${ha1}:${nonce}:${nc}:${cnonce}:${qop}:${ha2}`)
+    : md5(`${ha1}:${nonce}:${ha2}`);
+
+  const parts = [
+    `username="${username}"`,
+    `realm="${realm}"`,
+    `nonce="${nonce}"`,
+    `uri="${uri}"`,
+    `response="${response}"`,
+  ];
+  if (challenge.opaque) {
+    parts.push(`opaque="${challenge.opaque}"`);
+  }
+  if (qop) {
+    parts.push(`qop=${qop}`, `nc=${nc}`, `cnonce="${cnonce}"`);
+  }
+  return `Digest ${parts.join(", ")}`;
+}
+
+async function fetchWithTimeout(
+  url: URL,
+  options: RequestInit = {}
+): Promise<globalThis.Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 function buildNoticeUrl(
   baseUrl: string,
   kind: "error" | "notice",
@@ -327,7 +397,7 @@ function getSession(request: Request): SessionRow | null {
 
 function requireAuth(
   request: Request,
-  response: Response,
+  response: ExpressResponse,
   next: NextFunction
 ): void {
   const session = getSession(request);
@@ -364,6 +434,18 @@ function getUpstreamAuthHeader(device: DeviceWithPbx): string | null {
     `${device.pbx_upstream_username}:${device.pbx_upstream_password}`
   ).toString("base64");
   return `Basic ${token}`;
+}
+
+function getUpstreamCredentials(
+  device: DeviceWithPbx
+): { username: string; password: string } | null {
+  if (!device.pbx_upstream_username || !device.pbx_upstream_password) {
+    return null;
+  }
+  return {
+    username: device.pbx_upstream_username,
+    password: device.pbx_upstream_password,
+  };
 }
 
 function renderLayout({
@@ -1228,17 +1310,37 @@ app.get("/yealink/:mac.cfg", async (request, response) => {
       device.pbx_upstream_base_url
     );
     const headers: Record<string, string> = {};
-    const authHeader = getUpstreamAuthHeader(device);
-    if (authHeader) {
-      headers.authorization = authHeader;
-    }
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+    const credentials = getUpstreamCredentials(device);
+    let upstreamResponse: globalThis.Response | null = null;
     try {
-      const upstreamResponse = await fetch(upstreamUrl, {
-        headers,
-        signal: controller.signal,
-      });
+      upstreamResponse = await fetchWithTimeout(upstreamUrl, { headers });
+      if (upstreamResponse.status === 401 && credentials) {
+        const authHeader = upstreamResponse.headers.get("www-authenticate");
+        if (authHeader) {
+          const challenge = parseDigestChallenge(authHeader);
+          if (challenge) {
+            const digestHeader = buildDigestAuthHeader({
+              method: "GET",
+              url: upstreamUrl,
+              username: credentials.username,
+              password: credentials.password,
+              challenge,
+            });
+            if (digestHeader) {
+              upstreamResponse = await fetchWithTimeout(upstreamUrl, {
+                headers: { authorization: digestHeader },
+              });
+            }
+          } else if (authHeader.toLowerCase().includes("basic")) {
+            const basicHeader = getUpstreamAuthHeader(device);
+            if (basicHeader) {
+              upstreamResponse = await fetchWithTimeout(upstreamUrl, {
+                headers: { authorization: basicHeader },
+              });
+            }
+          }
+        }
+      }
       const contentType =
         upstreamResponse.headers.get("content-type") ||
         "text/plain; charset=utf-8";
@@ -1269,8 +1371,6 @@ app.get("/yealink/:mac.cfg", async (request, response) => {
       });
       response.status(502).send("Upstream provisioning failed.");
       return;
-    } finally {
-      clearTimeout(timeoutId);
     }
   }
 
