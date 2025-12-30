@@ -294,31 +294,21 @@ function requireAuth(
   response.redirect("/admin");
 }
 
-function requireProvisioningAuth(
-  request: Request,
-  response: Response,
-  device: DeviceWithPbx
-): boolean {
-  const provUser = device.pbx_prov_username;
-  const provPass = device.pbx_prov_password;
-  if (!provUser && !provPass) {
-    return true;
-  }
-  if (!provUser || !provPass) {
-    response.status(500).send("Provisioning credentials are misconfigured.");
-    return false;
-  }
-  const credentials = parseBasicAuthHeader(request.headers.authorization);
-  if (
-    !credentials ||
-    credentials.username !== provUser ||
-    credentials.password !== provPass
-  ) {
-    response.setHeader("WWW-Authenticate", "Basic realm=\"Provisioning\"");
-    response.status(401).send("Unauthorized");
-    return false;
-  }
-  return true;
+function logProvisioningAccess(entry: {
+  mac: string;
+  ip: string;
+  userAgent: string;
+  status: "ok" | "unauthorized" | "not_found" | "error";
+  reason?: string;
+  pbx?: string;
+}): void {
+  console.info(
+    JSON.stringify({
+      ts: new Date().toISOString(),
+      event: "provision_request",
+      ...entry,
+    })
+  );
 }
 
 function renderLayout({
@@ -1000,6 +990,13 @@ app.post(
 app.get("/yealink/:mac.cfg", (request, response) => {
   const normalized = normalizeMac(request.params.mac);
   if (!normalized) {
+    logProvisioningAccess({
+      mac: String(request.params.mac || ""),
+      ip: request.ip || "unknown",
+      userAgent: request.get("user-agent") || "unknown",
+      status: "not_found",
+      reason: "invalid_mac",
+    });
     response.status(404).send("Not Found");
     return;
   }
@@ -1008,15 +1005,61 @@ app.get("/yealink/:mac.cfg", (request, response) => {
     | DeviceWithPbx
     | undefined;
   if (!device) {
+    logProvisioningAccess({
+      mac: normalized,
+      ip: request.ip || "unknown",
+      userAgent: request.get("user-agent") || "unknown",
+      status: "not_found",
+      reason: "unknown_mac",
+    });
     response.status(404).send("Not Found");
     return;
   }
 
-  if (!requireProvisioningAuth(request, response, device)) {
-    return;
+  const provUser = device.pbx_prov_username;
+  const provPass = device.pbx_prov_password;
+  if (provUser || provPass) {
+    if (!provUser || !provPass) {
+      logProvisioningAccess({
+        mac: normalized,
+        ip: request.ip || "unknown",
+        userAgent: request.get("user-agent") || "unknown",
+        status: "error",
+        reason: "prov_credentials_misconfigured",
+        pbx: device.pbx_name,
+      });
+      response.status(500).send("Provisioning credentials are misconfigured.");
+      return;
+    }
+    const credentials = parseBasicAuthHeader(request.headers.authorization);
+    if (
+      !credentials ||
+      credentials.username !== provUser ||
+      credentials.password !== provPass
+    ) {
+      logProvisioningAccess({
+        mac: normalized,
+        ip: request.ip || "unknown",
+        userAgent: request.get("user-agent") || "unknown",
+        status: "unauthorized",
+        reason: credentials ? "invalid_credentials" : "missing_credentials",
+        pbx: device.pbx_name,
+      });
+      response.setHeader("WWW-Authenticate", "Basic realm=\"Provisioning\"");
+      response.status(401).send("Unauthorized");
+      return;
+    }
   }
 
   const config = renderYealinkConfig(device);
+  logProvisioningAccess({
+    mac: normalized,
+    ip: request.ip || "unknown",
+    userAgent: request.get("user-agent") || "unknown",
+    status: "ok",
+    reason: provUser ? "auth_ok" : "no_auth",
+    pbx: device.pbx_name,
+  });
   response.setHeader("Content-Type", "text/plain; charset=utf-8");
   response.setHeader("Cache-Control", "no-store");
   response.send(config);
