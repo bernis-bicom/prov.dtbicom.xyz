@@ -86,6 +86,8 @@ Note: because HTTPS is on port 8443, users must include the port in the URL.
 - The phone will request `${MAC}.cfg` automatically.
 - Example resolved URL:
   `https://prov.dtbicom.xyz:8443/yealink/001122334455.cfg`
+- If you set provisioning credentials on the PBX server, configure the phone's
+  auto-provision username/password to match.
 
 ## Admin workflow
 

@@ -6,6 +6,11 @@ export const transports = new Map<TransportKey, number>([
   ["tls", 2],
 ]);
 
+export type BasicAuthCredentials = {
+  username: string;
+  password: string;
+};
+
 export interface DeviceConfig {
   line_number?: number | null;
   label?: string | null;
@@ -94,4 +99,25 @@ export function renderYealinkConfig(device: DeviceConfig): string {
   }
 
   return lines.join("\n") + "\n";
+}
+
+export function parseBasicAuthHeader(
+  header: unknown
+): BasicAuthCredentials | null {
+  if (typeof header !== "string") return null;
+  const match = header.match(/^Basic\s+(.+)$/i);
+  if (!match) return null;
+  const token = match[1]?.trim();
+  if (!token) return null;
+  try {
+    const decoded = Buffer.from(token, "base64").toString("utf8");
+    const separatorIndex = decoded.indexOf(":");
+    if (separatorIndex < 0) return null;
+    return {
+      username: decoded.slice(0, separatorIndex),
+      password: decoded.slice(separatorIndex + 1),
+    };
+  } catch (error) {
+    return null;
+  }
 }

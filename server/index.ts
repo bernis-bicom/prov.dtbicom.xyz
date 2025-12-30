@@ -11,6 +11,7 @@ import {
   normalizeMac,
   normalizeTransport,
   parseInteger,
+  parseBasicAuthHeader,
   renderYealinkConfig,
 } from "./lib.js";
 
@@ -49,6 +50,8 @@ db.exec(`
     transport TEXT NOT NULL DEFAULT 'udp',
     outbound_proxy_host TEXT,
     outbound_proxy_port INTEGER,
+    prov_username TEXT,
+    prov_password TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -76,6 +79,26 @@ db.exec(`
   );
 `);
 
+function ensureColumns(
+  table: string,
+  columns: Array<{ name: string; type: string }>
+): void {
+  const existing = db
+    .prepare(`PRAGMA table_info(${table})`)
+    .all() as Array<{ name: string }>;
+  const names = new Set(existing.map((column) => column.name));
+  for (const column of columns) {
+    if (!names.has(column.name)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column.name} ${column.type}`);
+    }
+  }
+}
+
+ensureColumns("pbx_servers", [
+  { name: "prov_username", type: "TEXT" },
+  { name: "prov_password", type: "TEXT" },
+]);
+
 type PbxServer = {
   id: number;
   name: string;
@@ -84,6 +107,8 @@ type PbxServer = {
   transport: string;
   outbound_proxy_host: string | null;
   outbound_proxy_port: number | null;
+  prov_username: string | null;
+  prov_password: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -109,6 +134,8 @@ type DeviceWithPbx = Device & {
   pbx_transport: string;
   pbx_proxy_host: string | null;
   pbx_proxy_port: number | null;
+  pbx_prov_username: string | null;
+  pbx_prov_password: string | null;
 };
 
 type SessionRow = {
@@ -132,13 +159,13 @@ const statements = {
   getPbx: db.prepare("SELECT * FROM pbx_servers WHERE id = ?"),
   insertPbx: db.prepare(`
     INSERT INTO pbx_servers
-      (name, host, port, transport, outbound_proxy_host, outbound_proxy_port, created_at, updated_at)
+      (name, host, port, transport, outbound_proxy_host, outbound_proxy_port, prov_username, prov_password, created_at, updated_at)
     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?)
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   updatePbx: db.prepare(`
     UPDATE pbx_servers
-    SET name = ?, host = ?, port = ?, transport = ?, outbound_proxy_host = ?, outbound_proxy_port = ?, updated_at = ?
+    SET name = ?, host = ?, port = ?, transport = ?, outbound_proxy_host = ?, outbound_proxy_port = ?, prov_username = ?, prov_password = ?, updated_at = ?
     WHERE id = ?
   `),
   deletePbx: db.prepare("DELETE FROM pbx_servers WHERE id = ?"),
@@ -146,7 +173,9 @@ const statements = {
     SELECT devices.*, pbx_servers.name AS pbx_name, pbx_servers.host AS pbx_host,
            pbx_servers.port AS pbx_port, pbx_servers.transport AS pbx_transport,
            pbx_servers.outbound_proxy_host AS pbx_proxy_host,
-           pbx_servers.outbound_proxy_port AS pbx_proxy_port
+           pbx_servers.outbound_proxy_port AS pbx_proxy_port,
+           pbx_servers.prov_username AS pbx_prov_username,
+           pbx_servers.prov_password AS pbx_prov_password
     FROM devices
     JOIN pbx_servers ON pbx_servers.id = devices.pbx_server_id
     ORDER BY devices.label COLLATE NOCASE, devices.extension
@@ -155,7 +184,9 @@ const statements = {
     SELECT devices.*, pbx_servers.name AS pbx_name, pbx_servers.host AS pbx_host,
            pbx_servers.port AS pbx_port, pbx_servers.transport AS pbx_transport,
            pbx_servers.outbound_proxy_host AS pbx_proxy_host,
-           pbx_servers.outbound_proxy_port AS pbx_proxy_port
+           pbx_servers.outbound_proxy_port AS pbx_proxy_port,
+           pbx_servers.prov_username AS pbx_prov_username,
+           pbx_servers.prov_password AS pbx_prov_password
     FROM devices
     JOIN pbx_servers ON pbx_servers.id = devices.pbx_server_id
     WHERE devices.id = ?
@@ -164,7 +195,9 @@ const statements = {
     SELECT devices.*, pbx_servers.name AS pbx_name, pbx_servers.host AS pbx_host,
            pbx_servers.port AS pbx_port, pbx_servers.transport AS pbx_transport,
            pbx_servers.outbound_proxy_host AS pbx_proxy_host,
-           pbx_servers.outbound_proxy_port AS pbx_proxy_port
+           pbx_servers.outbound_proxy_port AS pbx_proxy_port,
+           pbx_servers.prov_username AS pbx_prov_username,
+           pbx_servers.prov_password AS pbx_prov_password
     FROM devices
     JOIN pbx_servers ON pbx_servers.id = devices.pbx_server_id
     WHERE devices.mac = ?
@@ -259,6 +292,33 @@ function requireAuth(
     return;
   }
   response.redirect("/admin");
+}
+
+function requireProvisioningAuth(
+  request: Request,
+  response: Response,
+  device: DeviceWithPbx
+): boolean {
+  const provUser = device.pbx_prov_username;
+  const provPass = device.pbx_prov_password;
+  if (!provUser && !provPass) {
+    return true;
+  }
+  if (!provUser || !provPass) {
+    response.status(500).send("Provisioning credentials are misconfigured.");
+    return false;
+  }
+  const credentials = parseBasicAuthHeader(request.headers.authorization);
+  if (
+    !credentials ||
+    credentials.username !== provUser ||
+    credentials.password !== provPass
+  ) {
+    response.setHeader("WWW-Authenticate", "Basic realm=\"Provisioning\"");
+    response.status(401).send("Unauthorized");
+    return false;
+  }
+  return true;
 }
 
 function renderLayout({
@@ -391,6 +451,18 @@ function renderAdminPage({
             <span>Proxy port</span>
             <input name="outbound_proxy_port" type="number" min="1" max="65535" value="${escapeHtml(
               server.outbound_proxy_port || ""
+            )}" placeholder="Optional" />
+          </label>
+          <label class="field">
+            <span>Prov user</span>
+            <input name="prov_username" type="text" value="${escapeHtml(
+              server.prov_username || ""
+            )}" placeholder="Optional" />
+          </label>
+          <label class="field">
+            <span>Prov pass</span>
+            <input name="prov_password" type="password" value="${escapeHtml(
+              server.prov_password || ""
             )}" placeholder="Optional" />
           </label>
           <div class="form-actions">
@@ -542,6 +614,14 @@ function renderAdminPage({
             <span>Proxy port</span>
             <input name="outbound_proxy_port" type="number" min="1" max="65535" placeholder="Optional" />
           </label>
+          <label class="field">
+            <span>Prov user</span>
+            <input name="prov_username" type="text" placeholder="Optional" />
+          </label>
+          <label class="field">
+            <span>Prov pass</span>
+            <input name="prov_password" type="password" placeholder="Optional" />
+          </label>
           <div class="form-actions">
             <button class="button" type="submit">Add server</button>
           </div>
@@ -686,10 +766,22 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
   const proxyPort = request.body.outbound_proxy_port
     ? parseInteger(request.body.outbound_proxy_port, 0)
     : null;
+  const provUser = String(request.body.prov_username || "").trim();
+  const provPass = String(request.body.prov_password || "");
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
       buildNoticeUrl("/admin", "error", "Invalid PBX server data.")
+    );
+    return;
+  }
+  if ((provUser && !provPass) || (!provUser && provPass)) {
+    response.redirect(
+      buildNoticeUrl(
+        "/admin",
+        "error",
+        "Provisioning username and password must both be set."
+      )
     );
     return;
   }
@@ -702,6 +794,8 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
     transport,
     proxyHost || null,
     proxyPort || null,
+    provUser || null,
+    provPass || null,
     now,
     now
   );
@@ -725,10 +819,22 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
   const proxyPort = request.body.outbound_proxy_port
     ? parseInteger(request.body.outbound_proxy_port, 0)
     : null;
+  const provUser = String(request.body.prov_username || "").trim();
+  const provPass = String(request.body.prov_password || "");
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
       buildNoticeUrl("/admin", "error", "Invalid PBX server data.")
+    );
+    return;
+  }
+  if ((provUser && !provPass) || (!provUser && provPass)) {
+    response.redirect(
+      buildNoticeUrl(
+        "/admin",
+        "error",
+        "Provisioning username and password must both be set."
+      )
     );
     return;
   }
@@ -741,6 +847,8 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
     transport,
     proxyHost || null,
     proxyPort || null,
+    provUser || null,
+    provPass || null,
     now,
     id
   );
@@ -901,6 +1009,10 @@ app.get("/yealink/:mac.cfg", (request, response) => {
     | undefined;
   if (!device) {
     response.status(404).send("Not Found");
+    return;
+  }
+
+  if (!requireProvisioningAuth(request, response, device)) {
     return;
   }
 

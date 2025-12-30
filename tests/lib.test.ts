@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatMac,
   normalizeMac,
+  parseBasicAuthHeader,
   renderYealinkConfig,
 } from "../server/lib.js";
 
@@ -59,5 +60,20 @@ describe("renderYealinkConfig", () => {
       "outbound_proxy.1.address = proxy.example.com"
     );
     expect(config).toContain("outbound_proxy.1.port = 5080");
+  });
+});
+
+describe("parseBasicAuthHeader", () => {
+  it("parses valid basic auth headers", () => {
+    const header = `Basic ${Buffer.from("user:pass").toString("base64")}`;
+    expect(parseBasicAuthHeader(header)).toEqual({
+      username: "user",
+      password: "pass",
+    });
+  });
+
+  it("rejects invalid headers", () => {
+    expect(parseBasicAuthHeader("Bearer token")).toBeNull();
+    expect(parseBasicAuthHeader("Basic")).toBeNull();
   });
 });
