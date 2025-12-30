@@ -98,7 +98,7 @@ db.exec(`
     vendor TEXT NOT NULL,
     model TEXT NOT NULL,
     version TEXT NOT NULL,
-    url TEXT NOT NULL UNIQUE,
+    url TEXT NOT NULL,
     source TEXT NOT NULL,
     fetched_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -138,6 +138,47 @@ ensureColumns("devices", [
   { name: "firmware_requested_at", type: "TEXT" },
   { name: "firmware_sent_at", type: "TEXT" },
 ]);
+
+function migrateFirmwareCatalogSchema(): void {
+  const indexes = db
+    .prepare("PRAGMA index_list(firmware_catalog)")
+    .all() as Array<{ name: string; unique: number }>;
+  const urlUniqueIndex = indexes.find((index) => {
+    if (!index.unique) return false;
+    const columns = db
+      .prepare(`PRAGMA index_info(${index.name})`)
+      .all() as Array<{ name: string }>;
+    return columns.length === 1 && columns[0]?.name === "url";
+  });
+  if (urlUniqueIndex) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE firmware_catalog_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          vendor TEXT NOT NULL,
+          model TEXT NOT NULL,
+          version TEXT NOT NULL,
+          url TEXT NOT NULL,
+          source TEXT NOT NULL,
+          fetched_at TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO firmware_catalog_new
+          (vendor, model, version, url, source, fetched_at, created_at, updated_at)
+        SELECT vendor, model, version, url, source, fetched_at, created_at, updated_at
+        FROM firmware_catalog;
+        DROP TABLE firmware_catalog;
+        ALTER TABLE firmware_catalog_new RENAME TO firmware_catalog;
+      `);
+    })();
+  }
+  db.exec(
+    "CREATE UNIQUE INDEX IF NOT EXISTS firmware_catalog_unique ON firmware_catalog(model, version, url, source)"
+  );
+}
+
+migrateFirmwareCatalogSchema();
 
 type PbxServer = {
   id: number;
@@ -331,7 +372,7 @@ const statements = {
       (vendor, model, version, url, source, fetched_at, created_at, updated_at)
     VALUES
       (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(url) DO UPDATE SET
+    ON CONFLICT(model, version, url, source) DO UPDATE SET
       vendor = excluded.vendor,
       model = excluded.model,
       version = excluded.version,
@@ -1448,8 +1489,9 @@ app.post("/admin/firmware/sync", requireAuth, async (_request, response) => {
     }
     const unique = new Map<string, FirmwareCatalogInput>();
     for (const entry of parsed) {
-      if (!unique.has(entry.url)) {
-        unique.set(entry.url, entry);
+      const key = `${entry.model}||${entry.version}||${entry.url}||${entry.source}`;
+      if (!unique.has(key)) {
+        unique.set(key, entry);
       }
     }
     const entries = Array.from(unique.values());
