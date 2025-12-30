@@ -711,11 +711,12 @@ function renderAdminPage({
           <div class="logo">P</div>
           <div>
             <p class="eyebrow">Provisioning</p>
-            <h1>Touchless config control</h1>
+            <h1>Yealink Auto Provisioning Switchboard</h1>
             <p class="subhead">Manage PBX servers and push Yealink configs instantly.</p>
             <p class="helper">Yealink server URL: ${escapeHtml(
               `${baseUrl}/yealink/`
             )} (phone appends its MAC + .cfg)</p>
+            <p class="attribution">Built by Bernis@Bicom</p>
           </div>
         </div>
         <div class="hero-meta">
@@ -1309,11 +1310,17 @@ app.get("/yealink/:mac.cfg", async (request, response) => {
       `${upstreamMac}.cfg`,
       device.pbx_upstream_base_url
     );
-    const headers: Record<string, string> = {};
+    const forwardedUserAgent = request.get("user-agent") || "Yealink";
+    const proxyHost = request.get("host") || "prov.dtbicom.xyz";
+    const baseHeaders: Record<string, string> = {
+      "user-agent": `${forwardedUserAgent} (via ${proxyHost})`,
+    };
     const credentials = getUpstreamCredentials(device);
     let upstreamResponse: globalThis.Response | null = null;
     try {
-      upstreamResponse = await fetchWithTimeout(upstreamUrl, { headers });
+      upstreamResponse = await fetchWithTimeout(upstreamUrl, {
+        headers: baseHeaders,
+      });
       if (upstreamResponse.status === 401 && credentials) {
         const authHeader = upstreamResponse.headers.get("www-authenticate");
         if (authHeader) {
@@ -1328,14 +1335,14 @@ app.get("/yealink/:mac.cfg", async (request, response) => {
             });
             if (digestHeader) {
               upstreamResponse = await fetchWithTimeout(upstreamUrl, {
-                headers: { authorization: digestHeader },
+                headers: { ...baseHeaders, authorization: digestHeader },
               });
             }
           } else if (authHeader.toLowerCase().includes("basic")) {
             const basicHeader = getUpstreamAuthHeader(device);
             if (basicHeader) {
               upstreamResponse = await fetchWithTimeout(upstreamUrl, {
-                headers: { authorization: basicHeader },
+                headers: { ...baseHeaders, authorization: basicHeader },
               });
             }
           }

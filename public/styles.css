@@ -144,6 +144,12 @@ body::after {
   font-size: 0.9rem;
 }
 
+.attribution {
+  margin: 10px 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
 .hero-meta {
   display: flex;
   gap: 18px;
