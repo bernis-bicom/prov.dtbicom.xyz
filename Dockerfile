@@ -5,8 +5,8 @@ WORKDIR /app
 
 RUN --mount=type=cache,target=/var/cache/apt \
   --mount=type=cache,target=/var/lib/apt \
-  apt-get update \
-  && apt-get install -y --no-install-recommends python3 make g++ \
+  apt-get -o Acquire::Retries=5 update \
+  && apt-get -o Acquire::Retries=5 install -y --no-install-recommends --fix-missing python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./

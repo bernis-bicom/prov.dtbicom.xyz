@@ -30,6 +30,10 @@ const SESSION_TTL_HOURS = Number.parseInt(
 const COOKIE_SECURE = process.env.COOKIE_SECURE
   ? process.env.COOKIE_SECURE === "1"
   : process.env.NODE_ENV === "production";
+const UPSTREAM_TIMEOUT_MS = Number.parseInt(
+  process.env.UPSTREAM_TIMEOUT_MS || "4000",
+  10
+);
 const DB_PATH =
   process.env.DB_PATH || path.join(projectRoot, "data", "provisioning.db");
 
@@ -52,6 +56,7 @@ db.exec(`
     outbound_proxy_port INTEGER,
     prov_username TEXT,
     prov_password TEXT,
+    upstream_base_url TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -97,6 +102,7 @@ function ensureColumns(
 ensureColumns("pbx_servers", [
   { name: "prov_username", type: "TEXT" },
   { name: "prov_password", type: "TEXT" },
+  { name: "upstream_base_url", type: "TEXT" },
 ]);
 
 type PbxServer = {
@@ -109,6 +115,7 @@ type PbxServer = {
   outbound_proxy_port: number | null;
   prov_username: string | null;
   prov_password: string | null;
+  upstream_base_url: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -136,6 +143,7 @@ type DeviceWithPbx = Device & {
   pbx_proxy_port: number | null;
   pbx_prov_username: string | null;
   pbx_prov_password: string | null;
+  pbx_upstream_base_url: string | null;
 };
 
 type SessionRow = {
@@ -159,13 +167,13 @@ const statements = {
   getPbx: db.prepare("SELECT * FROM pbx_servers WHERE id = ?"),
   insertPbx: db.prepare(`
     INSERT INTO pbx_servers
-      (name, host, port, transport, outbound_proxy_host, outbound_proxy_port, prov_username, prov_password, created_at, updated_at)
+      (name, host, port, transport, outbound_proxy_host, outbound_proxy_port, prov_username, prov_password, upstream_base_url, created_at, updated_at)
     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   updatePbx: db.prepare(`
     UPDATE pbx_servers
-    SET name = ?, host = ?, port = ?, transport = ?, outbound_proxy_host = ?, outbound_proxy_port = ?, prov_username = ?, prov_password = ?, updated_at = ?
+    SET name = ?, host = ?, port = ?, transport = ?, outbound_proxy_host = ?, outbound_proxy_port = ?, prov_username = ?, prov_password = ?, upstream_base_url = ?, updated_at = ?
     WHERE id = ?
   `),
   deletePbx: db.prepare("DELETE FROM pbx_servers WHERE id = ?"),
@@ -175,7 +183,8 @@ const statements = {
            pbx_servers.outbound_proxy_host AS pbx_proxy_host,
            pbx_servers.outbound_proxy_port AS pbx_proxy_port,
            pbx_servers.prov_username AS pbx_prov_username,
-           pbx_servers.prov_password AS pbx_prov_password
+           pbx_servers.prov_password AS pbx_prov_password,
+           pbx_servers.upstream_base_url AS pbx_upstream_base_url
     FROM devices
     JOIN pbx_servers ON pbx_servers.id = devices.pbx_server_id
     ORDER BY devices.label COLLATE NOCASE, devices.extension
@@ -186,7 +195,8 @@ const statements = {
            pbx_servers.outbound_proxy_host AS pbx_proxy_host,
            pbx_servers.outbound_proxy_port AS pbx_proxy_port,
            pbx_servers.prov_username AS pbx_prov_username,
-           pbx_servers.prov_password AS pbx_prov_password
+           pbx_servers.prov_password AS pbx_prov_password,
+           pbx_servers.upstream_base_url AS pbx_upstream_base_url
     FROM devices
     JOIN pbx_servers ON pbx_servers.id = devices.pbx_server_id
     WHERE devices.id = ?
@@ -197,7 +207,8 @@ const statements = {
            pbx_servers.outbound_proxy_host AS pbx_proxy_host,
            pbx_servers.outbound_proxy_port AS pbx_proxy_port,
            pbx_servers.prov_username AS pbx_prov_username,
-           pbx_servers.prov_password AS pbx_prov_password
+           pbx_servers.prov_password AS pbx_prov_password,
+           pbx_servers.upstream_base_url AS pbx_upstream_base_url
     FROM devices
     JOIN pbx_servers ON pbx_servers.id = devices.pbx_server_id
     WHERE devices.mac = ?
@@ -241,6 +252,19 @@ function escapeHtml(value: unknown): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function normalizeBaseUrl(value: string): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (!url.pathname.endsWith("/")) {
+      url.pathname += "/";
+    }
+    return url.toString();
+  } catch (error) {
+    return null;
+  }
 }
 
 function buildNoticeUrl(
@@ -309,6 +333,16 @@ function logProvisioningAccess(entry: {
       ...entry,
     })
   );
+}
+
+function getUpstreamAuthHeader(device: DeviceWithPbx): string | null {
+  if (!device.pbx_prov_username || !device.pbx_prov_password) {
+    return null;
+  }
+  const token = Buffer.from(
+    `${device.pbx_prov_username}:${device.pbx_prov_password}`
+  ).toString("base64");
+  return `Basic ${token}`;
 }
 
 function renderLayout({
@@ -454,6 +488,12 @@ function renderAdminPage({
             <input name="prov_password" type="password" value="${escapeHtml(
               server.prov_password || ""
             )}" placeholder="Optional" />
+          </label>
+          <label class="field">
+            <span>Upstream base URL</span>
+            <input name="upstream_base_url" type="url" value="${escapeHtml(
+              server.upstream_base_url || ""
+            )}" placeholder="https://pbx.example.com/prov/yealink/" />
           </label>
           <div class="form-actions">
             <button class="button" type="submit">Save</button>
@@ -612,6 +652,10 @@ function renderAdminPage({
             <span>Prov pass</span>
             <input name="prov_password" type="password" placeholder="Optional" />
           </label>
+          <label class="field">
+            <span>Upstream base URL</span>
+            <input name="upstream_base_url" type="url" placeholder="https://pbx.example.com/prov/yealink/" />
+          </label>
           <div class="form-actions">
             <button class="button" type="submit">Add server</button>
           </div>
@@ -758,6 +802,8 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
     : null;
   const provUser = String(request.body.prov_username || "").trim();
   const provPass = String(request.body.prov_password || "");
+  const upstreamBaseInput = String(request.body.upstream_base_url || "").trim();
+  const upstreamBaseUrl = normalizeBaseUrl(upstreamBaseInput);
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
@@ -775,6 +821,12 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
     );
     return;
   }
+  if (upstreamBaseInput && !upstreamBaseUrl) {
+    response.redirect(
+      buildNoticeUrl("/admin", "error", "Upstream URL is invalid.")
+    );
+    return;
+  }
 
   const now = new Date().toISOString();
   statements.insertPbx.run(
@@ -786,6 +838,7 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
     proxyPort || null,
     provUser || null,
     provPass || null,
+    upstreamBaseUrl || null,
     now,
     now
   );
@@ -811,6 +864,8 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
     : null;
   const provUser = String(request.body.prov_username || "").trim();
   const provPass = String(request.body.prov_password || "");
+  const upstreamBaseInput = String(request.body.upstream_base_url || "").trim();
+  const upstreamBaseUrl = normalizeBaseUrl(upstreamBaseInput);
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
@@ -828,6 +883,12 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
     );
     return;
   }
+  if (upstreamBaseInput && !upstreamBaseUrl) {
+    response.redirect(
+      buildNoticeUrl("/admin", "error", "Upstream URL is invalid.")
+    );
+    return;
+  }
 
   const now = new Date().toISOString();
   statements.updatePbx.run(
@@ -839,6 +900,7 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
     proxyPort || null,
     provUser || null,
     provPass || null,
+    upstreamBaseUrl || null,
     now,
     id
   );
@@ -987,7 +1049,7 @@ app.post(
   }
 );
 
-app.get("/yealink/:mac.cfg", (request, response) => {
+app.get("/yealink/:mac.cfg", async (request, response) => {
   const normalized = normalizeMac(request.params.mac);
   if (!normalized) {
     logProvisioningAccess({
@@ -1048,6 +1110,58 @@ app.get("/yealink/:mac.cfg", (request, response) => {
       response.setHeader("WWW-Authenticate", "Basic realm=\"Provisioning\"");
       response.status(401).send("Unauthorized");
       return;
+    }
+  }
+
+  if (device.pbx_upstream_base_url) {
+    const upstreamUrl = new URL(
+      `${normalized}.cfg`,
+      device.pbx_upstream_base_url
+    );
+    const headers: Record<string, string> = {};
+    const authHeader = getUpstreamAuthHeader(device);
+    if (authHeader) {
+      headers.authorization = authHeader;
+    }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+    try {
+      const upstreamResponse = await fetch(upstreamUrl, {
+        headers,
+        signal: controller.signal,
+      });
+      const contentType =
+        upstreamResponse.headers.get("content-type") ||
+        "text/plain; charset=utf-8";
+      const body = await upstreamResponse.text();
+      logProvisioningAccess({
+        mac: normalized,
+        ip: request.ip || "unknown",
+        userAgent: request.get("user-agent") || "unknown",
+        status: upstreamResponse.ok ? "ok" : "error",
+        reason: upstreamResponse.ok
+          ? "upstream_ok"
+          : `upstream_${upstreamResponse.status}`,
+        pbx: device.pbx_name,
+      });
+      response.status(upstreamResponse.status);
+      response.setHeader("Content-Type", contentType);
+      response.setHeader("Cache-Control", "no-store");
+      response.send(body || "Upstream provisioning failed.");
+      return;
+    } catch (error) {
+      logProvisioningAccess({
+        mac: normalized,
+        ip: request.ip || "unknown",
+        userAgent: request.get("user-agent") || "unknown",
+        status: "error",
+        reason: "upstream_error",
+        pbx: device.pbx_name,
+      });
+      response.status(502).send("Upstream provisioning failed.");
+      return;
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 

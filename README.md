@@ -95,6 +95,11 @@ Note: because HTTPS is on port 8443, users must include the port in the URL.
 2. Add a device with MAC + SIP auth credentials.
 3. The device config is generated dynamically at `/yealink/{mac}.cfg`.
 
+If you want BLFs/keys managed by PBXware, set the PBX server "Upstream base
+URL" to the PBXware provisioning path (for example:
+`https://mt.dtbicom.xyz/prov/yealink/`). When set, the provisioning server
+will fetch `${MAC}.cfg` from that upstream URL and return it to the phone.
+
 ## Environment variables
 
 - `ADMIN_USER`: admin username (default `admin`).
@@ -108,6 +113,7 @@ Note: because HTTPS is on port 8443, users must include the port in the URL.
 - `ACMEDNS_PASSWORD`: acme-dns password.
 - `ACMEDNS_SUBDOMAIN`: acme-dns subdomain.
 - `ACMEDNS_SERVER_URL`: acme-dns API URL.
+- `UPSTREAM_TIMEOUT_MS`: upstream provisioning fetch timeout (default `4000`).
 
 ## Data storage
 
