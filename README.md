@@ -7,7 +7,7 @@ Auto provisioning server for Yealink devices with a simple admin UI.
 - Admin UI at `/admin` with login + session cookies
 - SQLite-backed storage for PBX servers and device credentials
 - Dynamic Yealink config endpoint at `/yealink/{mac}.cfg`
-- Firmware catalog sync from 3CX with one-shot per-device updates
+- Firmware catalog sync from 3CX (V20 + V18) with one-shot per-device updates
 - Dockerized with Caddy reverse proxy (HTTPS on port 8443)
 
 ## Quick start (Docker + Caddy)

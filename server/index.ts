@@ -415,7 +415,10 @@ function cleanHtmlText(value: string): string {
     .trim();
 }
 
-function parse3cxFirmwareCatalog(html: string): FirmwareCatalogInput[] {
+function parse3cxFirmwareCatalog(
+  html: string,
+  source: string
+): FirmwareCatalogInput[] {
   const tableMatch = html.match(
     /<table class="firmwares"[^>]*>([\s\S]*?)<\/table>/i
   );
@@ -442,7 +445,7 @@ function parse3cxFirmwareCatalog(html: string): FirmwareCatalogInput[] {
       model,
       version,
       url,
-      source: "3cx",
+      source,
     });
   }
   return entries;
@@ -1003,7 +1006,7 @@ function renderAdminPage({
       <section class="card reveal" style="--delay:100ms">
         <div class="card-header">
           <h2>Firmware catalog</h2>
-          <p class="subhead">Sync firmware URLs from 3CX and target one-shot updates per device.</p>
+          <p class="subhead">Sync firmware URLs from 3CX (V20 + V18) and target one-shot updates per device.</p>
           <p class="helper">Entries: ${escapeHtml(
             firmwareCount
           )} &bull; Last sync: ${escapeHtml(firmwareLastSync)}</p>
@@ -1409,24 +1412,34 @@ app.post(
 
 app.post("/admin/firmware/sync", requireAuth, async (_request, response) => {
   try {
-    const upstreamResponse = await fetch(
-      "https://www.3cx.com/docs/phone-firmwares/",
-      {
-        headers: { "user-agent": "prov-dtbicom-xyz firmware sync" },
-      }
-    );
-    if (!upstreamResponse.ok) {
+    const fetchOptions = {
+      headers: { "user-agent": "prov-dtbicom-xyz firmware sync" },
+    };
+    const [v20Response, v18Response] = await Promise.all([
+      fetch("https://www.3cx.com/docs/phone-firmwares/", fetchOptions),
+      fetch("https://www.3cx.com/docs/phone-firmware-v18/", fetchOptions),
+    ]);
+    if (!v20Response.ok || !v18Response.ok) {
+      const status = !v20Response.ok
+        ? v20Response.status
+        : v18Response.status;
       response.redirect(
         buildNoticeUrl(
           "/admin",
           "error",
-          `Firmware sync failed (${upstreamResponse.status}).`
+          `Firmware sync failed (${status}).`
         )
       );
       return;
     }
-    const html = await upstreamResponse.text();
-    const parsed = parse3cxFirmwareCatalog(html);
+    const [v20Html, v18Html] = await Promise.all([
+      v20Response.text(),
+      v18Response.text(),
+    ]);
+    const parsed = [
+      ...parse3cxFirmwareCatalog(v20Html, "3cx-v20"),
+      ...parse3cxFirmwareCatalog(v18Html, "3cx-v18"),
+    ];
     if (!parsed.length) {
       response.redirect(
         buildNoticeUrl("/admin", "error", "No firmware entries found.")
