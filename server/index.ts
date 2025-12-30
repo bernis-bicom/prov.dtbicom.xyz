@@ -59,6 +59,7 @@ db.exec(`
     upstream_base_url TEXT,
     upstream_username TEXT,
     upstream_password TEXT,
+    upstream_mac_case TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -107,6 +108,7 @@ ensureColumns("pbx_servers", [
   { name: "upstream_base_url", type: "TEXT" },
   { name: "upstream_username", type: "TEXT" },
   { name: "upstream_password", type: "TEXT" },
+  { name: "upstream_mac_case", type: "TEXT" },
 ]);
 
 type PbxServer = {
@@ -122,6 +124,7 @@ type PbxServer = {
   upstream_base_url: string | null;
   upstream_username: string | null;
   upstream_password: string | null;
+  upstream_mac_case: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -152,6 +155,7 @@ type DeviceWithPbx = Device & {
   pbx_upstream_base_url: string | null;
   pbx_upstream_username: string | null;
   pbx_upstream_password: string | null;
+  pbx_upstream_mac_case: string | null;
 };
 
 type SessionRow = {
@@ -175,13 +179,13 @@ const statements = {
   getPbx: db.prepare("SELECT * FROM pbx_servers WHERE id = ?"),
   insertPbx: db.prepare(`
     INSERT INTO pbx_servers
-      (name, host, port, transport, outbound_proxy_host, outbound_proxy_port, prov_username, prov_password, upstream_base_url, upstream_username, upstream_password, created_at, updated_at)
+      (name, host, port, transport, outbound_proxy_host, outbound_proxy_port, prov_username, prov_password, upstream_base_url, upstream_username, upstream_password, upstream_mac_case, created_at, updated_at)
     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   updatePbx: db.prepare(`
     UPDATE pbx_servers
-    SET name = ?, host = ?, port = ?, transport = ?, outbound_proxy_host = ?, outbound_proxy_port = ?, prov_username = ?, prov_password = ?, upstream_base_url = ?, upstream_username = ?, upstream_password = ?, updated_at = ?
+    SET name = ?, host = ?, port = ?, transport = ?, outbound_proxy_host = ?, outbound_proxy_port = ?, prov_username = ?, prov_password = ?, upstream_base_url = ?, upstream_username = ?, upstream_password = ?, upstream_mac_case = ?, updated_at = ?
     WHERE id = ?
   `),
   deletePbx: db.prepare("DELETE FROM pbx_servers WHERE id = ?"),
@@ -194,7 +198,8 @@ const statements = {
            pbx_servers.prov_password AS pbx_prov_password,
            pbx_servers.upstream_base_url AS pbx_upstream_base_url,
            pbx_servers.upstream_username AS pbx_upstream_username,
-           pbx_servers.upstream_password AS pbx_upstream_password
+           pbx_servers.upstream_password AS pbx_upstream_password,
+           pbx_servers.upstream_mac_case AS pbx_upstream_mac_case
     FROM devices
     JOIN pbx_servers ON pbx_servers.id = devices.pbx_server_id
     ORDER BY devices.label COLLATE NOCASE, devices.extension
@@ -208,7 +213,8 @@ const statements = {
            pbx_servers.prov_password AS pbx_prov_password,
            pbx_servers.upstream_base_url AS pbx_upstream_base_url,
            pbx_servers.upstream_username AS pbx_upstream_username,
-           pbx_servers.upstream_password AS pbx_upstream_password
+           pbx_servers.upstream_password AS pbx_upstream_password,
+           pbx_servers.upstream_mac_case AS pbx_upstream_mac_case
     FROM devices
     JOIN pbx_servers ON pbx_servers.id = devices.pbx_server_id
     WHERE devices.id = ?
@@ -222,7 +228,8 @@ const statements = {
            pbx_servers.prov_password AS pbx_prov_password,
            pbx_servers.upstream_base_url AS pbx_upstream_base_url,
            pbx_servers.upstream_username AS pbx_upstream_username,
-           pbx_servers.upstream_password AS pbx_upstream_password
+           pbx_servers.upstream_password AS pbx_upstream_password,
+           pbx_servers.upstream_mac_case AS pbx_upstream_mac_case
     FROM devices
     JOIN pbx_servers ON pbx_servers.id = devices.pbx_server_id
     WHERE devices.mac = ?
@@ -521,6 +528,19 @@ function renderAdminPage({
               server.upstream_password || ""
             )}" placeholder="Optional" />
           </label>
+          <label class="field">
+            <span>Upstream MAC case</span>
+            <select name="upstream_mac_case">
+              <option value="lower"${
+                !server.upstream_mac_case || server.upstream_mac_case === "lower"
+                  ? " selected"
+                  : ""
+              }>lowercase</option>
+              <option value="upper"${
+                server.upstream_mac_case === "upper" ? " selected" : ""
+              }>UPPERCASE</option>
+            </select>
+          </label>
           <div class="form-actions">
             <button class="button" type="submit">Save</button>
           </div>
@@ -643,7 +663,7 @@ function renderAdminPage({
         <div class="card-header">
           <h2>PBX servers</h2>
           <p class="subhead">Store connection details and transport for each PBX.</p>
-          <p class="helper">Use upstream settings if PBXware already hosts full Yealink configs (BLFs, keys, etc.).</p>
+          <p class="helper">Use upstream settings if PBXware already hosts full Yealink configs (BLFs, keys, etc.). Base URL should point to the folder containing MAC.cfg; choose MAC case + upstream auth if needed.</p>
         </div>
         <form method="post" action="/admin/pbx-servers" class="form-grid">
           <label class="field">
@@ -693,6 +713,13 @@ function renderAdminPage({
           <label class="field">
             <span>Upstream pass</span>
             <input name="upstream_password" type="password" placeholder="Optional" />
+          </label>
+          <label class="field">
+            <span>Upstream MAC case</span>
+            <select name="upstream_mac_case">
+              <option value="lower" selected>lowercase</option>
+              <option value="upper">UPPERCASE</option>
+            </select>
           </label>
           <div class="form-actions">
             <button class="button" type="submit">Add server</button>
@@ -844,6 +871,11 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
   const upstreamBaseUrl = normalizeBaseUrl(upstreamBaseInput);
   const upstreamUser = String(request.body.upstream_username || "").trim();
   const upstreamPass = String(request.body.upstream_password || "");
+  const upstreamMacCaseInput = String(
+    request.body.upstream_mac_case || "lower"
+  ).toLowerCase();
+  const upstreamMacCase =
+    upstreamMacCaseInput === "upper" ? "upper" : "lower";
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
@@ -891,6 +923,7 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
     upstreamBaseUrl || null,
     upstreamUser || null,
     upstreamPass || null,
+    upstreamMacCase,
     now,
     now
   );
@@ -920,6 +953,11 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
   const upstreamBaseUrl = normalizeBaseUrl(upstreamBaseInput);
   const upstreamUser = String(request.body.upstream_username || "").trim();
   const upstreamPass = String(request.body.upstream_password || "");
+  const upstreamMacCaseInput = String(
+    request.body.upstream_mac_case || "lower"
+  ).toLowerCase();
+  const upstreamMacCase =
+    upstreamMacCaseInput === "upper" ? "upper" : "lower";
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
@@ -967,6 +1005,7 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
     upstreamBaseUrl || null,
     upstreamUser || null,
     upstreamPass || null,
+    upstreamMacCase,
     now,
     id
   );
@@ -1180,8 +1219,12 @@ app.get("/yealink/:mac.cfg", async (request, response) => {
   }
 
   if (device.pbx_upstream_base_url) {
+    const upstreamMac =
+      device.pbx_upstream_mac_case === "upper"
+        ? normalized.toUpperCase()
+        : normalized;
     const upstreamUrl = new URL(
-      `${normalized}.cfg`,
+      `${upstreamMac}.cfg`,
       device.pbx_upstream_base_url
     );
     const headers: Record<string, string> = {};
