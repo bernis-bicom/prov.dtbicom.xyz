@@ -12,6 +12,7 @@ import {
   normalizeTransport,
   parseInteger,
   parseBasicAuthHeader,
+  applyFirmwareUrl,
   renderYealinkConfig,
 } from "./lib.js";
 
@@ -74,6 +75,12 @@ db.exec(`
     display_name TEXT,
     pbx_server_id INTEGER NOT NULL,
     line_number INTEGER NOT NULL DEFAULT 1,
+    model TEXT,
+    firmware_id INTEGER,
+    firmware_url_override TEXT,
+    firmware_pending INTEGER NOT NULL DEFAULT 0,
+    firmware_requested_at TEXT,
+    firmware_sent_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (pbx_server_id) REFERENCES pbx_servers(id) ON DELETE CASCADE
@@ -84,6 +91,18 @@ db.exec(`
     token TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS firmware_catalog (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vendor TEXT NOT NULL,
+    model TEXT NOT NULL,
+    version TEXT NOT NULL,
+    url TEXT NOT NULL UNIQUE,
+    source TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
   );
 `);
 
@@ -109,6 +128,15 @@ ensureColumns("pbx_servers", [
   { name: "upstream_username", type: "TEXT" },
   { name: "upstream_password", type: "TEXT" },
   { name: "upstream_mac_case", type: "TEXT" },
+]);
+
+ensureColumns("devices", [
+  { name: "model", type: "TEXT" },
+  { name: "firmware_id", type: "INTEGER" },
+  { name: "firmware_url_override", type: "TEXT" },
+  { name: "firmware_pending", type: "INTEGER" },
+  { name: "firmware_requested_at", type: "TEXT" },
+  { name: "firmware_sent_at", type: "TEXT" },
 ]);
 
 type PbxServer = {
@@ -139,6 +167,12 @@ type Device = {
   display_name: string | null;
   pbx_server_id: number;
   line_number: number;
+  model: string | null;
+  firmware_id: number | null;
+  firmware_url_override: string | null;
+  firmware_pending: number | null;
+  firmware_requested_at: string | null;
+  firmware_sent_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -156,6 +190,10 @@ type DeviceWithPbx = Device & {
   pbx_upstream_username: string | null;
   pbx_upstream_password: string | null;
   pbx_upstream_mac_case: string | null;
+  firmware_vendor: string | null;
+  firmware_model: string | null;
+  firmware_version: string | null;
+  firmware_url: string | null;
 };
 
 type SessionRow = {
@@ -163,6 +201,26 @@ type SessionRow = {
   token: string;
   created_at: string;
   expires_at: string;
+};
+
+type FirmwareCatalogEntry = {
+  id: number;
+  vendor: string;
+  model: string;
+  version: string;
+  url: string;
+  source: string;
+  fetched_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type FirmwareCatalogInput = {
+  vendor: string;
+  model: string;
+  version: string;
+  url: string;
+  source: string;
 };
 
 type NoticeMessage = {
@@ -199,9 +257,14 @@ const statements = {
            pbx_servers.upstream_base_url AS pbx_upstream_base_url,
            pbx_servers.upstream_username AS pbx_upstream_username,
            pbx_servers.upstream_password AS pbx_upstream_password,
-           pbx_servers.upstream_mac_case AS pbx_upstream_mac_case
+           pbx_servers.upstream_mac_case AS pbx_upstream_mac_case,
+           firmware_catalog.vendor AS firmware_vendor,
+           firmware_catalog.model AS firmware_model,
+           firmware_catalog.version AS firmware_version,
+           firmware_catalog.url AS firmware_url
     FROM devices
     JOIN pbx_servers ON pbx_servers.id = devices.pbx_server_id
+    LEFT JOIN firmware_catalog ON firmware_catalog.id = devices.firmware_id
     ORDER BY devices.label COLLATE NOCASE, devices.extension
   `),
   getDevice: db.prepare(`
@@ -214,9 +277,14 @@ const statements = {
            pbx_servers.upstream_base_url AS pbx_upstream_base_url,
            pbx_servers.upstream_username AS pbx_upstream_username,
            pbx_servers.upstream_password AS pbx_upstream_password,
-           pbx_servers.upstream_mac_case AS pbx_upstream_mac_case
+           pbx_servers.upstream_mac_case AS pbx_upstream_mac_case,
+           firmware_catalog.vendor AS firmware_vendor,
+           firmware_catalog.model AS firmware_model,
+           firmware_catalog.version AS firmware_version,
+           firmware_catalog.url AS firmware_url
     FROM devices
     JOIN pbx_servers ON pbx_servers.id = devices.pbx_server_id
+    LEFT JOIN firmware_catalog ON firmware_catalog.id = devices.firmware_id
     WHERE devices.id = ?
   `),
   getDeviceByMac: db.prepare(`
@@ -229,23 +297,58 @@ const statements = {
            pbx_servers.upstream_base_url AS pbx_upstream_base_url,
            pbx_servers.upstream_username AS pbx_upstream_username,
            pbx_servers.upstream_password AS pbx_upstream_password,
-           pbx_servers.upstream_mac_case AS pbx_upstream_mac_case
+           pbx_servers.upstream_mac_case AS pbx_upstream_mac_case,
+           firmware_catalog.vendor AS firmware_vendor,
+           firmware_catalog.model AS firmware_model,
+           firmware_catalog.version AS firmware_version,
+           firmware_catalog.url AS firmware_url
     FROM devices
     JOIN pbx_servers ON pbx_servers.id = devices.pbx_server_id
+    LEFT JOIN firmware_catalog ON firmware_catalog.id = devices.firmware_id
     WHERE devices.mac = ?
   `),
   insertDevice: db.prepare(`
     INSERT INTO devices
-      (mac, label, extension, auth_user, auth_pass, display_name, pbx_server_id, line_number, created_at, updated_at)
+      (mac, label, extension, auth_user, auth_pass, display_name, pbx_server_id, line_number, model, firmware_id, firmware_url_override, firmware_pending, firmware_requested_at, firmware_sent_at, created_at, updated_at)
     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   updateDevice: db.prepare(`
     UPDATE devices
-    SET mac = ?, label = ?, extension = ?, auth_user = ?, auth_pass = ?, display_name = ?, pbx_server_id = ?, line_number = ?, updated_at = ?
+    SET mac = ?, label = ?, extension = ?, auth_user = ?, auth_pass = ?, display_name = ?, pbx_server_id = ?, line_number = ?, model = ?, firmware_id = ?, firmware_url_override = ?, updated_at = ?
     WHERE id = ?
   `),
   deleteDevice: db.prepare("DELETE FROM devices WHERE id = ?"),
+  listFirmware: db.prepare(
+    "SELECT * FROM firmware_catalog ORDER BY vendor COLLATE NOCASE, model COLLATE NOCASE, version COLLATE NOCASE"
+  ),
+  getFirmwareStats: db.prepare(
+    "SELECT COUNT(*) AS count, MAX(fetched_at) AS last_fetched_at FROM firmware_catalog"
+  ),
+  getFirmware: db.prepare("SELECT * FROM firmware_catalog WHERE id = ?"),
+  upsertFirmware: db.prepare(`
+    INSERT INTO firmware_catalog
+      (vendor, model, version, url, source, fetched_at, created_at, updated_at)
+    VALUES
+      (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(url) DO UPDATE SET
+      vendor = excluded.vendor,
+      model = excluded.model,
+      version = excluded.version,
+      source = excluded.source,
+      fetched_at = excluded.fetched_at,
+      updated_at = excluded.updated_at
+  `),
+  triggerFirmware: db.prepare(`
+    UPDATE devices
+    SET firmware_pending = 1, firmware_requested_at = ?, updated_at = ?
+    WHERE id = ?
+  `),
+  markFirmwareSent: db.prepare(`
+    UPDATE devices
+    SET firmware_pending = 0, firmware_sent_at = ?, updated_at = ?
+    WHERE id = ?
+  `),
   insertSession: db.prepare(
     "INSERT INTO sessions (token, created_at, expires_at) VALUES (?, ?, ?)"
   ),
@@ -286,6 +389,70 @@ function normalizeBaseUrl(value: string): string | null {
   } catch (error) {
     return null;
   }
+}
+
+function normalizeUrl(value: string): string | null {
+  if (!value) return null;
+  try {
+    return new URL(value).toString();
+  } catch (error) {
+    return null;
+  }
+}
+
+function decodeHtml(value: string): string {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'");
+}
+
+function cleanHtmlText(value: string): string {
+  return decodeHtml(value.replace(/<[^>]+>/g, ""))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parse3cxFirmwareCatalog(html: string): FirmwareCatalogInput[] {
+  const tableMatch = html.match(
+    /<table class="firmwares"[^>]*>([\s\S]*?)<\/table>/i
+  );
+  if (!tableMatch) return [];
+  const tableHtml = tableMatch[1];
+  const rowRegex =
+    /<tr[^>]*>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<td[^>]*>[\s\S]*?<\/td>\s*<td[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>/gi;
+  const entries: FirmwareCatalogInput[] = [];
+  let match: RegExpExecArray | null = null;
+  while ((match = rowRegex.exec(tableHtml)) !== null) {
+    const model = cleanHtmlText(match[1] ?? "");
+    const version = cleanHtmlText(match[2] ?? "");
+    const urlRaw = (match[3] ?? "").trim();
+    if (!model || !version || !urlRaw) continue;
+    let url: string;
+    try {
+      url = new URL(urlRaw, "https://www.3cx.com").toString();
+    } catch (error) {
+      continue;
+    }
+    const vendor = model.split(" ")[0] || "Unknown";
+    entries.push({
+      vendor,
+      model,
+      version,
+      url,
+      source: "3cx",
+    });
+  }
+  return entries;
+}
+
+function resolveDeviceFirmwareUrl(device: DeviceWithPbx): string | null {
+  const override = String(device.firmware_url_override || "").trim();
+  if (override) return override;
+  if (device.firmware_url) return device.firmware_url;
+  return null;
 }
 
 function md5(value: string): string {
@@ -517,15 +684,52 @@ function renderLoginPage({
   });
 }
 
+function buildFirmwareOptions(
+  entries: FirmwareCatalogEntry[],
+  selectedId: number | null,
+  modelFilter?: string | null
+): string {
+  const normalizedFilter = String(modelFilter || "").trim().toLowerCase();
+  let filtered = entries;
+  if (normalizedFilter) {
+    filtered = entries.filter((entry) =>
+      entry.model.toLowerCase().includes(normalizedFilter)
+    );
+    if (!filtered.length) {
+      filtered = entries;
+    }
+  }
+  const options = filtered
+    .map((entry) => {
+      const label = `${entry.model} (${entry.version})`;
+      const selected =
+        selectedId && entry.id === selectedId ? " selected" : "";
+      return `<option value="${entry.id}"${selected}>${escapeHtml(
+        label
+      )}</option>`;
+    })
+    .join("");
+  return `<option value="">None</option>${options}`;
+}
+
+function formatTimestamp(value: string | null): string {
+  if (!value) return "Never";
+  return value.replace("T", " ").replace("Z", "");
+}
+
 function renderAdminPage({
   request,
   pbxServers,
   devices,
+  firmwareCatalog,
+  firmwareStats,
   message,
 }: {
   request: Request;
   pbxServers: PbxServer[];
   devices: DeviceWithPbx[];
+  firmwareCatalog: FirmwareCatalogEntry[];
+  firmwareStats: { count: number; last_fetched_at: string | null };
   message: NoticeMessage | null;
 }): string {
   const host = request.get("host") ?? "localhost";
@@ -539,6 +743,15 @@ function renderAdminPage({
         )}</option>`
     )
     .join("");
+  const firmwareOptionsAll = buildFirmwareOptions(
+    firmwareCatalog,
+    null,
+    null
+  );
+  const firmwareCount = firmwareStats.count || 0;
+  const firmwareLastSync = firmwareStats.last_fetched_at
+    ? formatTimestamp(firmwareStats.last_fetched_at)
+    : "Never";
 
   const pbxRows = pbxServers
     .map((server, index) => {
@@ -638,6 +851,17 @@ function renderAdminPage({
   const deviceRows = devices
     .map((device, index) => {
       const delay = 140 + index * 40;
+      const firmwareOptions = buildFirmwareOptions(
+        firmwareCatalog,
+        device.firmware_id,
+        device.model
+      );
+      const firmwareUrl = resolveDeviceFirmwareUrl(device);
+      const firmwareLabel = device.firmware_url_override
+        ? "Firmware override URL"
+        : device.firmware_model
+          ? `${device.firmware_model} (${device.firmware_version || "unknown"})`
+          : null;
       return `
       <article class="item reveal" style="--delay:${delay}ms">
         <form method="post" action="/admin/devices/${device.id}" class="form-grid form-grid--tight">
@@ -664,6 +888,22 @@ function renderAdminPage({
           <label class="field">
             <span>Display name</span>
             <input name="display_name" type="text" value="${escapeHtml(device.display_name || "")}" placeholder="Optional" />
+          </label>
+          <label class="field">
+            <span>Model</span>
+            <input name="model" type="text" value="${escapeHtml(device.model || "")}" placeholder="Yealink T43U" />
+          </label>
+          <label class="field">
+            <span>Firmware</span>
+            <select name="firmware_id">
+              ${firmwareOptions}
+            </select>
+          </label>
+          <label class="field">
+            <span>Firmware override URL</span>
+            <input name="firmware_url_override" type="url" value="${escapeHtml(
+              device.firmware_url_override || ""
+            )}" placeholder="https://example.com/fw.rom" />
           </label>
           <label class="field">
             <span>PBX server</span>
@@ -695,7 +935,25 @@ function renderAdminPage({
           <span class="tag mono">${escapeHtml(
             `${baseUrl}/yealink/${formatMac(device.mac)}.cfg`
           )}</span>
+          ${
+            firmwareLabel
+              ? `<span class="tag">${escapeHtml(firmwareLabel)}</span>`
+              : ""
+          }
+          ${
+            device.firmware_pending
+              ? `<span class="tag tag--pending">Firmware pending</span>`
+              : ""
+          }
+          <span class="tag">Last sent: ${escapeHtml(
+            formatTimestamp(device.firmware_sent_at)
+          )}</span>
         </div>
+        <form method="post" action="/admin/devices/${device.id}/firmware/trigger" class="inline-form">
+          <button class="button button--ghost" type="submit"${
+            firmwareUrl ? "" : " disabled"
+          }>Trigger firmware update</button>
+        </form>
         <form method="post" action="/admin/devices/${device.id}/delete" class="inline-form">
           <button class="button button--ghost" type="submit">Delete</button>
         </form>
@@ -742,6 +1000,19 @@ function renderAdminPage({
     </header>
 
     <main class="shell">
+      <section class="card reveal" style="--delay:100ms">
+        <div class="card-header">
+          <h2>Firmware catalog</h2>
+          <p class="subhead">Sync firmware URLs from 3CX and target one-shot updates per device.</p>
+          <p class="helper">Entries: ${escapeHtml(
+            firmwareCount
+          )} &bull; Last sync: ${escapeHtml(firmwareLastSync)}</p>
+        </div>
+        <form method="post" action="/admin/firmware/sync" class="form-grid form-grid--tight">
+          <button class="button" type="submit">Sync from 3CX</button>
+        </form>
+      </section>
+
       <section class="card reveal" style="--delay:120ms">
         <div class="card-header">
           <h2>PBX servers</h2>
@@ -817,6 +1088,7 @@ function renderAdminPage({
         <div class="card-header">
           <h2>Devices</h2>
           <p class="subhead">Pair a MAC address with SIP credentials and a PBX.</p>
+          <p class="helper">Firmware updates are one-shot and apply on the next provisioning request.</p>
         </div>
         <form method="post" action="/admin/devices" class="form-grid">
           <label class="field">
@@ -842,6 +1114,20 @@ function renderAdminPage({
           <label class="field">
             <span>Display name</span>
             <input name="display_name" type="text" placeholder="Optional" />
+          </label>
+          <label class="field">
+            <span>Model</span>
+            <input name="model" type="text" placeholder="Yealink T43U" />
+          </label>
+          <label class="field">
+            <span>Firmware</span>
+            <select name="firmware_id">
+              ${firmwareOptionsAll}
+            </select>
+          </label>
+          <label class="field">
+            <span>Firmware override URL</span>
+            <input name="firmware_url_override" type="url" placeholder="https://example.com/fw.rom" />
           </label>
           <label class="field">
             <span>PBX server</span>
@@ -905,8 +1191,23 @@ app.get("/admin", (request, response) => {
 
   const pbxServers = statements.listPbx.all() as PbxServer[];
   const devices = statements.listDevices.all() as DeviceWithPbx[];
+  const firmwareCatalog = statements.listFirmware.all() as FirmwareCatalogEntry[];
+  const firmwareStatsRow = statements.getFirmwareStats.get() as
+    | { count: number; last_fetched_at: string | null }
+    | undefined;
+  const firmwareStats = {
+    count: firmwareStatsRow?.count ?? 0,
+    last_fetched_at: firmwareStatsRow?.last_fetched_at ?? null,
+  };
   response.send(
-    renderAdminPage({ request, pbxServers, devices, message })
+    renderAdminPage({
+      request,
+      pbxServers,
+      devices,
+      firmwareCatalog,
+      firmwareStats,
+      message,
+    })
   );
 });
 
@@ -1106,6 +1407,69 @@ app.post(
   }
 );
 
+app.post("/admin/firmware/sync", requireAuth, async (_request, response) => {
+  try {
+    const upstreamResponse = await fetch(
+      "https://www.3cx.com/docs/phone-firmwares/",
+      {
+        headers: { "user-agent": "prov-dtbicom-xyz firmware sync" },
+      }
+    );
+    if (!upstreamResponse.ok) {
+      response.redirect(
+        buildNoticeUrl(
+          "/admin",
+          "error",
+          `Firmware sync failed (${upstreamResponse.status}).`
+        )
+      );
+      return;
+    }
+    const html = await upstreamResponse.text();
+    const parsed = parse3cxFirmwareCatalog(html);
+    if (!parsed.length) {
+      response.redirect(
+        buildNoticeUrl("/admin", "error", "No firmware entries found.")
+      );
+      return;
+    }
+    const unique = new Map<string, FirmwareCatalogInput>();
+    for (const entry of parsed) {
+      if (!unique.has(entry.url)) {
+        unique.set(entry.url, entry);
+      }
+    }
+    const entries = Array.from(unique.values());
+    const now = new Date().toISOString();
+    const insertEntries = db.transaction((rows: FirmwareCatalogInput[]) => {
+      for (const row of rows) {
+        statements.upsertFirmware.run(
+          row.vendor,
+          row.model,
+          row.version,
+          row.url,
+          row.source,
+          now,
+          now,
+          now
+        );
+      }
+    });
+    insertEntries(entries);
+    response.redirect(
+      buildNoticeUrl(
+        "/admin",
+        "notice",
+        `Firmware sync complete (${entries.length} entries).`
+      )
+    );
+  } catch (error) {
+    response.redirect(
+      buildNoticeUrl("/admin", "error", "Firmware sync failed.")
+    );
+  }
+});
+
 app.post("/admin/devices", requireAuth, (request, response) => {
   const mac = normalizeMac(request.body.mac);
   const label = String(request.body.label || "").trim();
@@ -1113,6 +1477,11 @@ app.post("/admin/devices", requireAuth, (request, response) => {
   const authUser = String(request.body.auth_user || "").trim();
   const authPass = String(request.body.auth_pass || "");
   const displayName = String(request.body.display_name || "").trim();
+  const model = String(request.body.model || "").trim();
+  const firmwareIdInput = parseInteger(request.body.firmware_id, 0);
+  const firmwareUrlOverrideInput = String(
+    request.body.firmware_url_override || ""
+  ).trim();
   const pbxServerId = parseInteger(request.body.pbx_server_id, 0);
   const lineNumber = parseInteger(request.body.line_number, 1);
 
@@ -1129,6 +1498,26 @@ app.post("/admin/devices", requireAuth, (request, response) => {
       buildNoticeUrl("/admin", "error", "Invalid device data.")
     );
     return;
+  }
+
+  const firmwareUrlOverride = firmwareUrlOverrideInput
+    ? normalizeUrl(firmwareUrlOverrideInput)
+    : null;
+  if (firmwareUrlOverrideInput && !firmwareUrlOverride) {
+    response.redirect(
+      buildNoticeUrl("/admin", "error", "Firmware override URL is invalid.")
+    );
+    return;
+  }
+
+  let firmwareId: number | null = null;
+  if (firmwareIdInput > 0) {
+    const firmware = statements.getFirmware.get(
+      firmwareIdInput
+    ) as FirmwareCatalogEntry | undefined;
+    if (firmware) {
+      firmwareId = firmwareIdInput;
+    }
   }
 
   const pbx = statements.getPbx.get(pbxServerId) as PbxServer | undefined;
@@ -1150,6 +1539,12 @@ app.post("/admin/devices", requireAuth, (request, response) => {
       displayName || null,
       pbxServerId,
       lineNumber,
+      model || null,
+      firmwareId,
+      firmwareUrlOverride,
+      0,
+      null,
+      null,
       now,
       now
     );
@@ -1177,6 +1572,11 @@ app.post("/admin/devices/:id", requireAuth, (request, response) => {
   const authUser = String(request.body.auth_user || "").trim();
   const authPass = String(request.body.auth_pass || "");
   const displayName = String(request.body.display_name || "").trim();
+  const model = String(request.body.model || "").trim();
+  const firmwareIdInput = parseInteger(request.body.firmware_id, 0);
+  const firmwareUrlOverrideInput = String(
+    request.body.firmware_url_override || ""
+  ).trim();
   const pbxServerId = parseInteger(request.body.pbx_server_id, 0);
   const lineNumber = parseInteger(request.body.line_number, 1);
 
@@ -1193,6 +1593,26 @@ app.post("/admin/devices/:id", requireAuth, (request, response) => {
       buildNoticeUrl("/admin", "error", "Invalid device data.")
     );
     return;
+  }
+
+  const firmwareUrlOverride = firmwareUrlOverrideInput
+    ? normalizeUrl(firmwareUrlOverrideInput)
+    : null;
+  if (firmwareUrlOverrideInput && !firmwareUrlOverride) {
+    response.redirect(
+      buildNoticeUrl("/admin", "error", "Firmware override URL is invalid.")
+    );
+    return;
+  }
+
+  let firmwareId: number | null = null;
+  if (firmwareIdInput > 0) {
+    const firmware = statements.getFirmware.get(
+      firmwareIdInput
+    ) as FirmwareCatalogEntry | undefined;
+    if (firmware) {
+      firmwareId = firmwareIdInput;
+    }
   }
 
   const pbx = statements.getPbx.get(pbxServerId) as PbxServer | undefined;
@@ -1214,6 +1634,9 @@ app.post("/admin/devices/:id", requireAuth, (request, response) => {
       displayName || null,
       pbxServerId,
       lineNumber,
+      model || null,
+      firmwareId,
+      firmwareUrlOverride,
       now,
       id
     );
@@ -1226,6 +1649,39 @@ app.post("/admin/devices/:id", requireAuth, (request, response) => {
 
   response.redirect(buildNoticeUrl("/admin", "notice", "Device updated."));
 });
+
+app.post(
+  "/admin/devices/:id/firmware/trigger",
+  requireAuth,
+  (request, response) => {
+    const id = Number.parseInt(request.params.id, 10);
+    const device = statements.getDevice.get(id) as DeviceWithPbx | undefined;
+    if (!device) {
+      response.redirect(buildNoticeUrl("/admin", "error", "Device not found."));
+      return;
+    }
+    const firmwareUrl = resolveDeviceFirmwareUrl(device);
+    if (!firmwareUrl) {
+      response.redirect(
+        buildNoticeUrl(
+          "/admin",
+          "error",
+          "Select firmware or set an override URL first."
+        )
+      );
+      return;
+    }
+    const now = new Date().toISOString();
+    statements.triggerFirmware.run(now, now, id);
+    response.redirect(
+      buildNoticeUrl(
+        "/admin",
+        "notice",
+        "Firmware update queued for next provision."
+      )
+    );
+  }
+);
 
 app.post(
   "/admin/devices/:id/delete",
@@ -1301,6 +1757,10 @@ app.get("/yealink/:mac.cfg", async (request, response) => {
     }
   }
 
+  const firmwareUrl = resolveDeviceFirmwareUrl(device);
+  const firmwarePending = Boolean(device.firmware_pending);
+  const shouldInjectFirmware = firmwarePending && Boolean(firmwareUrl);
+
   if (device.pbx_upstream_base_url) {
     const upstreamMac =
       device.pbx_upstream_mac_case === "upper"
@@ -1352,6 +1812,14 @@ app.get("/yealink/:mac.cfg", async (request, response) => {
         upstreamResponse.headers.get("content-type") ||
         "text/plain; charset=utf-8";
       const body = await upstreamResponse.text();
+      const shouldApplyFirmware = upstreamResponse.ok && shouldInjectFirmware;
+      const responseBody = shouldApplyFirmware
+        ? applyFirmwareUrl(body, firmwareUrl as string)
+        : body;
+      if (shouldApplyFirmware) {
+        const now = new Date().toISOString();
+        statements.markFirmwareSent.run(now, now, device.id);
+      }
       logProvisioningAccess({
         mac: normalized,
         ip: request.ip || "unknown",
@@ -1365,7 +1833,7 @@ app.get("/yealink/:mac.cfg", async (request, response) => {
       response.status(upstreamResponse.status);
       response.setHeader("Content-Type", contentType);
       response.setHeader("Cache-Control", "no-store");
-      response.send(body || "Upstream provisioning failed.");
+      response.send(responseBody || "Upstream provisioning failed.");
       return;
     } catch (error) {
       logProvisioningAccess({
@@ -1381,7 +1849,12 @@ app.get("/yealink/:mac.cfg", async (request, response) => {
     }
   }
 
-  const config = renderYealinkConfig(device);
+  let config = renderYealinkConfig(device);
+  if (shouldInjectFirmware) {
+    config = applyFirmwareUrl(config, firmwareUrl as string);
+    const now = new Date().toISOString();
+    statements.markFirmwareSent.run(now, now, device.id);
+  }
   logProvisioningAccess({
     mac: normalized,
     ip: request.ip || "unknown",

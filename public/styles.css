@@ -333,6 +333,11 @@ select:focus {
   color: #24584c;
 }
 
+.tag--pending {
+  background: rgba(224, 107, 60, 0.16);
+  color: #7a2d14;
+}
+
 .mono {
   font-family: var(--font-mono);
 }

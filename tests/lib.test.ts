@@ -3,6 +3,7 @@ import {
   formatMac,
   normalizeMac,
   parseBasicAuthHeader,
+  applyFirmwareUrl,
   renderYealinkConfig,
 } from "../server/lib.js";
 
@@ -78,5 +79,21 @@ describe("parseBasicAuthHeader", () => {
   it("rejects invalid headers", () => {
     expect(parseBasicAuthHeader("Bearer token")).toBeNull();
     expect(parseBasicAuthHeader("Basic")).toBeNull();
+  });
+});
+
+describe("applyFirmwareUrl", () => {
+  it("appends firmware.url when missing", () => {
+    const config = "#!version:1.0.0.1\naccount.1.enable = 1\n";
+    const output = applyFirmwareUrl(config, "https://example.com/fw.rom");
+    expect(output).toContain("firmware.url = https://example.com/fw.rom");
+  });
+
+  it("replaces existing firmware.url entries", () => {
+    const config =
+      "#!version:1.0.0.1\nfirmware.url = http://old/fw.rom\naccount.1.enable = 1\n";
+    const output = applyFirmwareUrl(config, "https://example.com/fw.rom");
+    expect(output).not.toContain("firmware.url = http://old/fw.rom");
+    expect(output).toContain("firmware.url = https://example.com/fw.rom");
   });
 });

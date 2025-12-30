@@ -104,6 +104,23 @@ export function renderYealinkConfig(device: DeviceConfig): string {
   return lines.join("\n") + "\n";
 }
 
+export function applyFirmwareUrl(
+  config: string,
+  firmwareUrl: string
+): string {
+  const sanitizedUrl = sanitizeConfigValue(firmwareUrl);
+  if (!sanitizedUrl) return config;
+  const lines = config.replace(/\r/g, "").split("\n");
+  const filtered = lines.filter(
+    (line) => !line.trim().toLowerCase().startsWith("firmware.url")
+  );
+  while (filtered.length > 0 && filtered[filtered.length - 1] === "") {
+    filtered.pop();
+  }
+  filtered.push(`firmware.url = ${sanitizedUrl}`);
+  return filtered.join("\n") + "\n";
+}
+
 export function parseBasicAuthHeader(
   header: unknown
 ): BasicAuthCredentials | null {

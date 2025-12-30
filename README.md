@@ -1,12 +1,13 @@
 # prov.dtbicom.xyz
 
-Touchless provisioning server for Yealink devices with a simple admin UI.
+Auto provisioning server for Yealink devices with a simple admin UI.
 
 ## Features
 
 - Admin UI at `/admin` with login + session cookies
 - SQLite-backed storage for PBX servers and device credentials
 - Dynamic Yealink config endpoint at `/yealink/{mac}.cfg`
+- Firmware catalog sync from 3CX with one-shot per-device updates
 - Dockerized with Caddy reverse proxy (HTTPS on port 8443)
 
 ## Quick start (Docker + Caddy)
@@ -94,6 +95,8 @@ Note: because HTTPS is on port 8443, users must include the port in the URL.
 1. Add a PBX server (host, port, transport, optional outbound proxy).
 2. Add a device with MAC + SIP auth credentials.
 3. The device config is generated dynamically at `/yealink/{mac}.cfg`.
+4. Optional: sync firmware from 3CX, choose a firmware URL per device, and
+   trigger a one-shot update.
 
 If you want BLFs/keys managed by PBXware, set the PBX server "Upstream base
 URL" to the PBXware provisioning path (for example:
@@ -122,6 +125,23 @@ MAC case" to UPPERCASE.
 
 SQLite database lives at `data/provisioning.db` when running locally or in the
 Docker volume `prov-data` when running the compose stack.
+
+### Backup/restore (Docker volume)
+
+Backup:
+
+```bash
+mkdir -p backup
+docker run --rm -v provdtbicomxyz_prov-data:/data -v "$PWD/backup":/backup alpine \\
+  sh -c "tar czf /backup/prov-data.tgz -C /data ."
+```
+
+Restore:
+
+```bash
+docker run --rm -v provdtbicomxyz_prov-data:/data -v "$PWD/backup":/backup alpine \\
+  sh -c "tar xzf /backup/prov-data.tgz -C /data"
+```
 
 ## Local dev (no Docker)
 
