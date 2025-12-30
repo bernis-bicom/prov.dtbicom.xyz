@@ -57,6 +57,8 @@ db.exec(`
     prov_username TEXT,
     prov_password TEXT,
     upstream_base_url TEXT,
+    upstream_username TEXT,
+    upstream_password TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -103,6 +105,8 @@ ensureColumns("pbx_servers", [
   { name: "prov_username", type: "TEXT" },
   { name: "prov_password", type: "TEXT" },
   { name: "upstream_base_url", type: "TEXT" },
+  { name: "upstream_username", type: "TEXT" },
+  { name: "upstream_password", type: "TEXT" },
 ]);
 
 type PbxServer = {
@@ -116,6 +120,8 @@ type PbxServer = {
   prov_username: string | null;
   prov_password: string | null;
   upstream_base_url: string | null;
+  upstream_username: string | null;
+  upstream_password: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -144,6 +150,8 @@ type DeviceWithPbx = Device & {
   pbx_prov_username: string | null;
   pbx_prov_password: string | null;
   pbx_upstream_base_url: string | null;
+  pbx_upstream_username: string | null;
+  pbx_upstream_password: string | null;
 };
 
 type SessionRow = {
@@ -167,13 +175,13 @@ const statements = {
   getPbx: db.prepare("SELECT * FROM pbx_servers WHERE id = ?"),
   insertPbx: db.prepare(`
     INSERT INTO pbx_servers
-      (name, host, port, transport, outbound_proxy_host, outbound_proxy_port, prov_username, prov_password, upstream_base_url, created_at, updated_at)
+      (name, host, port, transport, outbound_proxy_host, outbound_proxy_port, prov_username, prov_password, upstream_base_url, upstream_username, upstream_password, created_at, updated_at)
     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   updatePbx: db.prepare(`
     UPDATE pbx_servers
-    SET name = ?, host = ?, port = ?, transport = ?, outbound_proxy_host = ?, outbound_proxy_port = ?, prov_username = ?, prov_password = ?, upstream_base_url = ?, updated_at = ?
+    SET name = ?, host = ?, port = ?, transport = ?, outbound_proxy_host = ?, outbound_proxy_port = ?, prov_username = ?, prov_password = ?, upstream_base_url = ?, upstream_username = ?, upstream_password = ?, updated_at = ?
     WHERE id = ?
   `),
   deletePbx: db.prepare("DELETE FROM pbx_servers WHERE id = ?"),
@@ -184,7 +192,9 @@ const statements = {
            pbx_servers.outbound_proxy_port AS pbx_proxy_port,
            pbx_servers.prov_username AS pbx_prov_username,
            pbx_servers.prov_password AS pbx_prov_password,
-           pbx_servers.upstream_base_url AS pbx_upstream_base_url
+           pbx_servers.upstream_base_url AS pbx_upstream_base_url,
+           pbx_servers.upstream_username AS pbx_upstream_username,
+           pbx_servers.upstream_password AS pbx_upstream_password
     FROM devices
     JOIN pbx_servers ON pbx_servers.id = devices.pbx_server_id
     ORDER BY devices.label COLLATE NOCASE, devices.extension
@@ -196,7 +206,9 @@ const statements = {
            pbx_servers.outbound_proxy_port AS pbx_proxy_port,
            pbx_servers.prov_username AS pbx_prov_username,
            pbx_servers.prov_password AS pbx_prov_password,
-           pbx_servers.upstream_base_url AS pbx_upstream_base_url
+           pbx_servers.upstream_base_url AS pbx_upstream_base_url,
+           pbx_servers.upstream_username AS pbx_upstream_username,
+           pbx_servers.upstream_password AS pbx_upstream_password
     FROM devices
     JOIN pbx_servers ON pbx_servers.id = devices.pbx_server_id
     WHERE devices.id = ?
@@ -208,7 +220,9 @@ const statements = {
            pbx_servers.outbound_proxy_port AS pbx_proxy_port,
            pbx_servers.prov_username AS pbx_prov_username,
            pbx_servers.prov_password AS pbx_prov_password,
-           pbx_servers.upstream_base_url AS pbx_upstream_base_url
+           pbx_servers.upstream_base_url AS pbx_upstream_base_url,
+           pbx_servers.upstream_username AS pbx_upstream_username,
+           pbx_servers.upstream_password AS pbx_upstream_password
     FROM devices
     JOIN pbx_servers ON pbx_servers.id = devices.pbx_server_id
     WHERE devices.mac = ?
@@ -336,11 +350,11 @@ function logProvisioningAccess(entry: {
 }
 
 function getUpstreamAuthHeader(device: DeviceWithPbx): string | null {
-  if (!device.pbx_prov_username || !device.pbx_prov_password) {
+  if (!device.pbx_upstream_username || !device.pbx_upstream_password) {
     return null;
   }
   const token = Buffer.from(
-    `${device.pbx_prov_username}:${device.pbx_prov_password}`
+    `${device.pbx_upstream_username}:${device.pbx_upstream_password}`
   ).toString("base64");
   return `Basic ${token}`;
 }
@@ -495,6 +509,18 @@ function renderAdminPage({
               server.upstream_base_url || ""
             )}" placeholder="https://pbx.example.com/prov/yealink/" />
           </label>
+          <label class="field">
+            <span>Upstream user</span>
+            <input name="upstream_username" type="text" value="${escapeHtml(
+              server.upstream_username || ""
+            )}" placeholder="Optional" />
+          </label>
+          <label class="field">
+            <span>Upstream pass</span>
+            <input name="upstream_password" type="password" value="${escapeHtml(
+              server.upstream_password || ""
+            )}" placeholder="Optional" />
+          </label>
           <div class="form-actions">
             <button class="button" type="submit">Save</button>
           </div>
@@ -585,6 +611,9 @@ function renderAdminPage({
             <p class="eyebrow">Provisioning</p>
             <h1>Touchless config control</h1>
             <p class="subhead">Manage PBX servers and push Yealink configs instantly.</p>
+            <p class="helper">Yealink server URL: ${escapeHtml(
+              `${baseUrl}/yealink/`
+            )} (phone appends its MAC + .cfg)</p>
           </div>
         </div>
         <div class="hero-meta">
@@ -614,6 +643,7 @@ function renderAdminPage({
         <div class="card-header">
           <h2>PBX servers</h2>
           <p class="subhead">Store connection details and transport for each PBX.</p>
+          <p class="helper">Use upstream settings if PBXware already hosts full Yealink configs (BLFs, keys, etc.).</p>
         </div>
         <form method="post" action="/admin/pbx-servers" class="form-grid">
           <label class="field">
@@ -655,6 +685,14 @@ function renderAdminPage({
           <label class="field">
             <span>Upstream base URL</span>
             <input name="upstream_base_url" type="url" placeholder="https://pbx.example.com/prov/yealink/" />
+          </label>
+          <label class="field">
+            <span>Upstream user</span>
+            <input name="upstream_username" type="text" placeholder="Optional" />
+          </label>
+          <label class="field">
+            <span>Upstream pass</span>
+            <input name="upstream_password" type="password" placeholder="Optional" />
           </label>
           <div class="form-actions">
             <button class="button" type="submit">Add server</button>
@@ -804,6 +842,8 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
   const provPass = String(request.body.prov_password || "");
   const upstreamBaseInput = String(request.body.upstream_base_url || "").trim();
   const upstreamBaseUrl = normalizeBaseUrl(upstreamBaseInput);
+  const upstreamUser = String(request.body.upstream_username || "").trim();
+  const upstreamPass = String(request.body.upstream_password || "");
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
@@ -827,6 +867,16 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
     );
     return;
   }
+  if ((upstreamUser && !upstreamPass) || (!upstreamUser && upstreamPass)) {
+    response.redirect(
+      buildNoticeUrl(
+        "/admin",
+        "error",
+        "Upstream username and password must both be set."
+      )
+    );
+    return;
+  }
 
   const now = new Date().toISOString();
   statements.insertPbx.run(
@@ -839,6 +889,8 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
     provUser || null,
     provPass || null,
     upstreamBaseUrl || null,
+    upstreamUser || null,
+    upstreamPass || null,
     now,
     now
   );
@@ -866,6 +918,8 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
   const provPass = String(request.body.prov_password || "");
   const upstreamBaseInput = String(request.body.upstream_base_url || "").trim();
   const upstreamBaseUrl = normalizeBaseUrl(upstreamBaseInput);
+  const upstreamUser = String(request.body.upstream_username || "").trim();
+  const upstreamPass = String(request.body.upstream_password || "");
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
@@ -889,6 +943,16 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
     );
     return;
   }
+  if ((upstreamUser && !upstreamPass) || (!upstreamUser && upstreamPass)) {
+    response.redirect(
+      buildNoticeUrl(
+        "/admin",
+        "error",
+        "Upstream username and password must both be set."
+      )
+    );
+    return;
+  }
 
   const now = new Date().toISOString();
   statements.updatePbx.run(
@@ -901,6 +965,8 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
     provUser || null,
     provPass || null,
     upstreamBaseUrl || null,
+    upstreamUser || null,
+    upstreamPass || null,
     now,
     id
   );

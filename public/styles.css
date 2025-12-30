@@ -138,6 +138,12 @@ body::after {
   font-size: 0.98rem;
 }
 
+.helper {
+  margin: 10px 0 0;
+  color: var(--accent-3);
+  font-size: 0.9rem;
+}
+
 .hero-meta {
   display: flex;
   gap: 18px;

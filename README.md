@@ -99,6 +99,7 @@ If you want BLFs/keys managed by PBXware, set the PBX server "Upstream base
 URL" to the PBXware provisioning path (for example:
 `https://mt.dtbicom.xyz/prov/yealink/`). When set, the provisioning server
 will fetch `${MAC}.cfg` from that upstream URL and return it to the phone.
+If the upstream requires auth, set the PBX server "Upstream user/pass" fields.
 
 ## Environment variables
 
