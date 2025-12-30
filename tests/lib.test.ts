@@ -43,6 +43,9 @@ describe("renderYealinkConfig", () => {
     expect(config).toContain("account.2.sip_server.1.address = pbx.example.com");
     expect(config).toContain("account.2.sip_server.1.port = 5061");
     expect(config).toContain("account.2.transport = 1");
+    expect(config).toContain("account.2.sip_server_host = pbx.example.com");
+    expect(config).toContain("account.2.sip_server_port = 5061");
+    expect(config).toContain("account.2.sip_server.1.transport_type = 1");
   });
 
   it("includes outbound proxy when configured", () => {

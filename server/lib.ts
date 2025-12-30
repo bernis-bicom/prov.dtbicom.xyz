@@ -76,8 +76,11 @@ export function renderYealinkConfig(device: DeviceConfig): string {
     `account.${line}.user_name = ${userName}`,
     `account.${line}.auth_name = ${authName}`,
     `account.${line}.password = ${password}`,
+    `account.${line}.sip_server_host = ${serverHost}`,
+    `account.${line}.sip_server_port = ${serverPort}`,
     `account.${line}.sip_server.1.address = ${serverHost}`,
     `account.${line}.sip_server.1.port = ${serverPort}`,
+    `account.${line}.sip_server.1.transport_type = ${transportValue}`,
     `account.${line}.transport = ${transportValue}`,
   ];
 
