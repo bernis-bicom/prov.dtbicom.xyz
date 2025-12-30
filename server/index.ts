@@ -2,7 +2,9 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
+import tls from "node:tls";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import type { NextFunction, Request, Response as ExpressResponse } from "express";
@@ -35,6 +37,10 @@ const UPSTREAM_TIMEOUT_MS = Number.parseInt(
   process.env.UPSTREAM_TIMEOUT_MS || "4000",
   10
 );
+const AMI_TIMEOUT_MS = Number.parseInt(
+  process.env.AMI_TIMEOUT_MS || "4000",
+  10
+);
 const DB_PATH =
   process.env.DB_PATH || path.join(projectRoot, "data", "provisioning.db");
 
@@ -61,6 +67,11 @@ db.exec(`
     upstream_username TEXT,
     upstream_password TEXT,
     upstream_mac_case TEXT,
+    ami_host TEXT,
+    ami_port INTEGER,
+    ami_username TEXT,
+    ami_password TEXT,
+    ami_tls INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -76,6 +87,7 @@ db.exec(`
     pbx_server_id INTEGER NOT NULL,
     line_number INTEGER NOT NULL DEFAULT 1,
     model TEXT,
+    pjsip_endpoint TEXT,
     firmware_id INTEGER,
     firmware_url_override TEXT,
     firmware_pending INTEGER NOT NULL DEFAULT 0,
@@ -128,10 +140,16 @@ ensureColumns("pbx_servers", [
   { name: "upstream_username", type: "TEXT" },
   { name: "upstream_password", type: "TEXT" },
   { name: "upstream_mac_case", type: "TEXT" },
+  { name: "ami_host", type: "TEXT" },
+  { name: "ami_port", type: "INTEGER" },
+  { name: "ami_username", type: "TEXT" },
+  { name: "ami_password", type: "TEXT" },
+  { name: "ami_tls", type: "INTEGER" },
 ]);
 
 ensureColumns("devices", [
   { name: "model", type: "TEXT" },
+  { name: "pjsip_endpoint", type: "TEXT" },
   { name: "firmware_id", type: "INTEGER" },
   { name: "firmware_url_override", type: "TEXT" },
   { name: "firmware_pending", type: "INTEGER" },
@@ -194,6 +212,11 @@ type PbxServer = {
   upstream_username: string | null;
   upstream_password: string | null;
   upstream_mac_case: string | null;
+  ami_host: string | null;
+  ami_port: number | null;
+  ami_username: string | null;
+  ami_password: string | null;
+  ami_tls: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -209,6 +232,7 @@ type Device = {
   pbx_server_id: number;
   line_number: number;
   model: string | null;
+  pjsip_endpoint: string | null;
   firmware_id: number | null;
   firmware_url_override: string | null;
   firmware_pending: number | null;
@@ -231,6 +255,11 @@ type DeviceWithPbx = Device & {
   pbx_upstream_username: string | null;
   pbx_upstream_password: string | null;
   pbx_upstream_mac_case: string | null;
+  pbx_ami_host: string | null;
+  pbx_ami_port: number | null;
+  pbx_ami_username: string | null;
+  pbx_ami_password: string | null;
+  pbx_ami_tls: number | null;
   firmware_vendor: string | null;
   firmware_model: string | null;
   firmware_version: string | null;
@@ -278,13 +307,13 @@ const statements = {
   getPbx: db.prepare("SELECT * FROM pbx_servers WHERE id = ?"),
   insertPbx: db.prepare(`
     INSERT INTO pbx_servers
-      (name, host, port, transport, outbound_proxy_host, outbound_proxy_port, prov_username, prov_password, upstream_base_url, upstream_username, upstream_password, upstream_mac_case, created_at, updated_at)
+      (name, host, port, transport, outbound_proxy_host, outbound_proxy_port, prov_username, prov_password, upstream_base_url, upstream_username, upstream_password, upstream_mac_case, ami_host, ami_port, ami_username, ami_password, ami_tls, created_at, updated_at)
     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   updatePbx: db.prepare(`
     UPDATE pbx_servers
-    SET name = ?, host = ?, port = ?, transport = ?, outbound_proxy_host = ?, outbound_proxy_port = ?, prov_username = ?, prov_password = ?, upstream_base_url = ?, upstream_username = ?, upstream_password = ?, upstream_mac_case = ?, updated_at = ?
+    SET name = ?, host = ?, port = ?, transport = ?, outbound_proxy_host = ?, outbound_proxy_port = ?, prov_username = ?, prov_password = ?, upstream_base_url = ?, upstream_username = ?, upstream_password = ?, upstream_mac_case = ?, ami_host = ?, ami_port = ?, ami_username = ?, ami_password = ?, ami_tls = ?, updated_at = ?
     WHERE id = ?
   `),
   deletePbx: db.prepare("DELETE FROM pbx_servers WHERE id = ?"),
@@ -299,6 +328,11 @@ const statements = {
            pbx_servers.upstream_username AS pbx_upstream_username,
            pbx_servers.upstream_password AS pbx_upstream_password,
            pbx_servers.upstream_mac_case AS pbx_upstream_mac_case,
+           pbx_servers.ami_host AS pbx_ami_host,
+           pbx_servers.ami_port AS pbx_ami_port,
+           pbx_servers.ami_username AS pbx_ami_username,
+           pbx_servers.ami_password AS pbx_ami_password,
+           pbx_servers.ami_tls AS pbx_ami_tls,
            firmware_catalog.vendor AS firmware_vendor,
            firmware_catalog.model AS firmware_model,
            firmware_catalog.version AS firmware_version,
@@ -319,6 +353,11 @@ const statements = {
            pbx_servers.upstream_username AS pbx_upstream_username,
            pbx_servers.upstream_password AS pbx_upstream_password,
            pbx_servers.upstream_mac_case AS pbx_upstream_mac_case,
+           pbx_servers.ami_host AS pbx_ami_host,
+           pbx_servers.ami_port AS pbx_ami_port,
+           pbx_servers.ami_username AS pbx_ami_username,
+           pbx_servers.ami_password AS pbx_ami_password,
+           pbx_servers.ami_tls AS pbx_ami_tls,
            firmware_catalog.vendor AS firmware_vendor,
            firmware_catalog.model AS firmware_model,
            firmware_catalog.version AS firmware_version,
@@ -339,6 +378,11 @@ const statements = {
            pbx_servers.upstream_username AS pbx_upstream_username,
            pbx_servers.upstream_password AS pbx_upstream_password,
            pbx_servers.upstream_mac_case AS pbx_upstream_mac_case,
+           pbx_servers.ami_host AS pbx_ami_host,
+           pbx_servers.ami_port AS pbx_ami_port,
+           pbx_servers.ami_username AS pbx_ami_username,
+           pbx_servers.ami_password AS pbx_ami_password,
+           pbx_servers.ami_tls AS pbx_ami_tls,
            firmware_catalog.vendor AS firmware_vendor,
            firmware_catalog.model AS firmware_model,
            firmware_catalog.version AS firmware_version,
@@ -350,13 +394,13 @@ const statements = {
   `),
   insertDevice: db.prepare(`
     INSERT INTO devices
-      (mac, label, extension, auth_user, auth_pass, display_name, pbx_server_id, line_number, model, firmware_id, firmware_url_override, firmware_pending, firmware_requested_at, firmware_sent_at, created_at, updated_at)
+      (mac, label, extension, auth_user, auth_pass, display_name, pbx_server_id, line_number, model, pjsip_endpoint, firmware_id, firmware_url_override, firmware_pending, firmware_requested_at, firmware_sent_at, created_at, updated_at)
     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   updateDevice: db.prepare(`
     UPDATE devices
-    SET mac = ?, label = ?, extension = ?, auth_user = ?, auth_pass = ?, display_name = ?, pbx_server_id = ?, line_number = ?, model = ?, firmware_id = ?, firmware_url_override = ?, updated_at = ?
+    SET mac = ?, label = ?, extension = ?, auth_user = ?, auth_pass = ?, display_name = ?, pbx_server_id = ?, line_number = ?, model = ?, pjsip_endpoint = ?, firmware_id = ?, firmware_url_override = ?, updated_at = ?
     WHERE id = ?
   `),
   deleteDevice: db.prepare("DELETE FROM devices WHERE id = ?"),
@@ -567,6 +611,128 @@ async function fetchWithTimeout(
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+type AmiMessage = Record<string, string>;
+
+function sanitizeAmiValue(value: string): string {
+  return value.replace(/[\r\n]/g, " ").trim();
+}
+
+function parseAmiMessage(block: string): AmiMessage {
+  const message: AmiMessage = {};
+  for (const line of block.split(/\r\n/)) {
+    const separator = line.indexOf(":");
+    if (separator <= 0) continue;
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (key) {
+      message[key] = value;
+    }
+  }
+  return message;
+}
+
+function formatAmiAction(fields: AmiMessage): string {
+  const lines = Object.entries(fields).map(
+    ([key, value]) => `${key}: ${sanitizeAmiValue(value)}`
+  );
+  return `${lines.join("\r\n")}\r\n\r\n`;
+}
+
+function createAmiActionId(): string {
+  return crypto.randomUUID
+    ? crypto.randomUUID()
+    : crypto.randomBytes(12).toString("hex");
+}
+
+async function createAmiClient(options: {
+  host: string;
+  port: number;
+  useTls: boolean;
+}): Promise<{
+  sendAction: (fields: AmiMessage) => Promise<AmiMessage>;
+  close: () => void;
+}> {
+  const { host, port, useTls } = options;
+  return new Promise((resolve, reject) => {
+    const socket = useTls
+      ? tls.connect({ host, port, rejectUnauthorized: false })
+      : net.createConnection({ host, port });
+    let buffer = "";
+    let connected = false;
+    const pending = new Map<
+      string,
+      { resolve: (msg: AmiMessage) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
+    >();
+
+    const flushPending = (error: Error) => {
+      for (const entry of pending.values()) {
+        clearTimeout(entry.timer);
+        entry.reject(error);
+      }
+      pending.clear();
+    };
+
+    socket.setTimeout(AMI_TIMEOUT_MS);
+    socket.on("timeout", () => {
+      socket.destroy(new Error("AMI connection timed out."));
+    });
+    socket.on("error", (error) => {
+      if (!connected) {
+        reject(error);
+      }
+      flushPending(error instanceof Error ? error : new Error(String(error)));
+    });
+    socket.on("close", () => {
+      flushPending(new Error("AMI connection closed."));
+    });
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let boundary = buffer.indexOf("\r\n\r\n");
+      while (boundary !== -1) {
+        const raw = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 4);
+        boundary = buffer.indexOf("\r\n\r\n");
+        if (!raw.trim()) continue;
+        const message = parseAmiMessage(raw);
+        const actionId = message.ActionID;
+        if (actionId && pending.has(actionId)) {
+          const entry = pending.get(actionId);
+          if (entry) {
+            clearTimeout(entry.timer);
+            pending.delete(actionId);
+            entry.resolve(message);
+          }
+        }
+      }
+    });
+    socket.on("connect", () => {
+      connected = true;
+      socket.setTimeout(0);
+      resolve({
+        sendAction: (fields: AmiMessage) => {
+          return new Promise((sendResolve, sendReject) => {
+            const actionId = createAmiActionId();
+            const payload = { ...fields, ActionID: actionId };
+            const timer = setTimeout(() => {
+              pending.delete(actionId);
+              sendReject(new Error("AMI response timeout."));
+            }, AMI_TIMEOUT_MS);
+            pending.set(actionId, {
+              resolve: sendResolve,
+              reject: sendReject,
+              timer,
+            });
+            socket.write(formatAmiAction(payload));
+          });
+        },
+        close: () => {
+          socket.end();
+        },
+      });
+    });
+  });
 }
 
 function buildNoticeUrl(
@@ -880,9 +1046,47 @@ function renderAdminPage({
               }>UPPERCASE</option>
             </select>
           </label>
+          <label class="field">
+            <span>AMI host</span>
+            <input name="ami_host" type="text" value="${escapeHtml(
+              server.ami_host || ""
+            )}" placeholder="pbx.dtbicom.xyz" />
+          </label>
+          <label class="field">
+            <span>AMI port</span>
+            <input name="ami_port" type="number" min="1" max="65535" value="${escapeHtml(
+              server.ami_port || 5038
+            )}" />
+          </label>
+          <label class="field">
+            <span>AMI user</span>
+            <input name="ami_username" type="text" value="${escapeHtml(
+              server.ami_username || ""
+            )}" placeholder="Optional" />
+          </label>
+          <label class="field">
+            <span>AMI pass</span>
+            <input name="ami_password" type="password" value="${escapeHtml(
+              server.ami_password || ""
+            )}" placeholder="Optional" />
+          </label>
+          <label class="field">
+            <span>AMI TLS</span>
+            <select name="ami_tls">
+              <option value="0"${
+                !server.ami_tls ? " selected" : ""
+              }>Disabled</option>
+              <option value="1"${
+                server.ami_tls ? " selected" : ""
+              }>Enabled</option>
+            </select>
+          </label>
           <div class="form-actions">
             <button class="button" type="submit">Save</button>
           </div>
+        </form>
+        <form method="post" action="/admin/pbx-servers/${server.id}/test-ami" class="inline-form">
+          <button class="button button--ghost" type="submit">Test AMI</button>
         </form>
         <form method="post" action="/admin/pbx-servers/${server.id}/delete" class="inline-form">
           <button class="button button--ghost" type="submit">Delete</button>
@@ -906,6 +1110,15 @@ function renderAdminPage({
         : device.firmware_model
           ? `${device.firmware_model} (${device.firmware_version || "unknown"})`
           : null;
+      const notifyEndpoint = String(
+        device.pjsip_endpoint || device.auth_user || ""
+      ).trim();
+      const notifyReady = Boolean(
+        device.pbx_ami_host &&
+          device.pbx_ami_username &&
+          device.pbx_ami_password &&
+          notifyEndpoint
+      );
       return `
       <article class="item reveal" style="--delay:${delay}ms">
         <form method="post" action="/admin/devices/${device.id}" class="form-grid form-grid--tight">
@@ -936,6 +1149,12 @@ function renderAdminPage({
           <label class="field">
             <span>Model</span>
             <input name="model" type="text" value="${escapeHtml(device.model || "")}" placeholder="Yealink T43U" />
+          </label>
+          <label class="field">
+            <span>PJSIP endpoint</span>
+            <input name="pjsip_endpoint" type="text" value="${escapeHtml(
+              device.pjsip_endpoint || ""
+            )}" placeholder="200100" />
           </label>
           <label class="field">
             <span>Firmware</span>
@@ -997,6 +1216,11 @@ function renderAdminPage({
           <button class="button button--ghost" type="submit"${
             firmwareUrl ? "" : " disabled"
           }>Trigger firmware update</button>
+        </form>
+        <form method="post" action="/admin/devices/${device.id}/notify" class="inline-form">
+          <button class="button button--ghost" type="submit"${
+            notifyReady ? "" : " disabled"
+          }>Trigger check-sync</button>
         </form>
         <form method="post" action="/admin/devices/${device.id}/delete" class="inline-form">
           <button class="button button--ghost" type="submit">Delete</button>
@@ -1062,6 +1286,8 @@ function renderAdminPage({
           <h2>PBX servers</h2>
           <p class="subhead">Store connection details and transport for each PBX.</p>
           <p class="helper">Use upstream settings if PBXware already hosts full Yealink configs (BLFs, keys, etc.). Base URL should point to the folder containing MAC.cfg; choose MAC case + upstream auth if needed.</p>
+          <p class="helper">AMI settings enable check-sync notifications (PJSIPNotify) for instant reprovisioning.</p>
+          <p class="helper">Use "Test AMI" after saving to verify the credentials before triggering check-sync.</p>
         </div>
         <form method="post" action="/admin/pbx-servers" class="form-grid">
           <label class="field">
@@ -1119,6 +1345,29 @@ function renderAdminPage({
               <option value="upper">UPPERCASE</option>
             </select>
           </label>
+          <label class="field">
+            <span>AMI host</span>
+            <input name="ami_host" type="text" placeholder="pbx.dtbicom.xyz" />
+          </label>
+          <label class="field">
+            <span>AMI port</span>
+            <input name="ami_port" type="number" min="1" max="65535" value="5038" />
+          </label>
+          <label class="field">
+            <span>AMI user</span>
+            <input name="ami_username" type="text" placeholder="Optional" />
+          </label>
+          <label class="field">
+            <span>AMI pass</span>
+            <input name="ami_password" type="password" placeholder="Optional" />
+          </label>
+          <label class="field">
+            <span>AMI TLS</span>
+            <select name="ami_tls">
+              <option value="0" selected>Disabled</option>
+              <option value="1">Enabled</option>
+            </select>
+          </label>
           <div class="form-actions">
             <button class="button" type="submit">Add server</button>
           </div>
@@ -1133,6 +1382,7 @@ function renderAdminPage({
           <h2>Devices</h2>
           <p class="subhead">Pair a MAC address with SIP credentials and a PBX.</p>
           <p class="helper">Firmware updates are one-shot and apply on the next provisioning request.</p>
+          <p class="helper">Check-sync notifications require AMI credentials on the PBX and a PJSIP endpoint.</p>
         </div>
         <form method="post" action="/admin/devices" class="form-grid">
           <label class="field">
@@ -1162,6 +1412,10 @@ function renderAdminPage({
           <label class="field">
             <span>Model</span>
             <input name="model" type="text" placeholder="Yealink T43U" />
+          </label>
+          <label class="field">
+            <span>PJSIP endpoint</span>
+            <input name="pjsip_endpoint" type="text" placeholder="200100" />
           </label>
           <label class="field">
             <span>Firmware</span>
@@ -1304,6 +1558,11 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
   ).toLowerCase();
   const upstreamMacCase =
     upstreamMacCaseInput === "upper" ? "upper" : "lower";
+  const amiHostInput = String(request.body.ami_host || "").trim();
+  const amiPortInput = parseInteger(request.body.ami_port, 5038);
+  const amiUser = String(request.body.ami_username || "").trim();
+  const amiPass = String(request.body.ami_password || "");
+  const amiTls = String(request.body.ami_tls || "0") === "1" ? 1 : 0;
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
@@ -1337,6 +1596,27 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
     );
     return;
   }
+  if (amiHostInput && (amiPortInput < 1 || amiPortInput > 65535)) {
+    response.redirect(
+      buildNoticeUrl("/admin", "error", "AMI port is invalid.")
+    );
+    return;
+  }
+  if ((amiHostInput || amiUser || amiPass) && (!amiHostInput || !amiUser || !amiPass)) {
+    response.redirect(
+      buildNoticeUrl(
+        "/admin",
+        "error",
+        "AMI host, username, and password must all be set."
+      )
+    );
+    return;
+  }
+  const amiHost = amiHostInput || null;
+  const amiPort = amiHost ? amiPortInput : null;
+  const amiUsername = amiHost ? amiUser : null;
+  const amiPassword = amiHost ? amiPass : null;
+  const amiTlsValue = amiHost ? amiTls : 0;
 
   const now = new Date().toISOString();
   statements.insertPbx.run(
@@ -1352,6 +1632,11 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
     upstreamUser || null,
     upstreamPass || null,
     upstreamMacCase,
+    amiHost,
+    amiPort,
+    amiUsername,
+    amiPassword,
+    amiTlsValue,
     now,
     now
   );
@@ -1386,6 +1671,11 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
   ).toLowerCase();
   const upstreamMacCase =
     upstreamMacCaseInput === "upper" ? "upper" : "lower";
+  const amiHostInput = String(request.body.ami_host || "").trim();
+  const amiPortInput = parseInteger(request.body.ami_port, 5038);
+  const amiUser = String(request.body.ami_username || "").trim();
+  const amiPass = String(request.body.ami_password || "");
+  const amiTls = String(request.body.ami_tls || "0") === "1" ? 1 : 0;
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
@@ -1419,6 +1709,27 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
     );
     return;
   }
+  if (amiHostInput && (amiPortInput < 1 || amiPortInput > 65535)) {
+    response.redirect(
+      buildNoticeUrl("/admin", "error", "AMI port is invalid.")
+    );
+    return;
+  }
+  if ((amiHostInput || amiUser || amiPass) && (!amiHostInput || !amiUser || !amiPass)) {
+    response.redirect(
+      buildNoticeUrl(
+        "/admin",
+        "error",
+        "AMI host, username, and password must all be set."
+      )
+    );
+    return;
+  }
+  const amiHost = amiHostInput || null;
+  const amiPort = amiHost ? amiPortInput : null;
+  const amiUsername = amiHost ? amiUser : null;
+  const amiPassword = amiHost ? amiPass : null;
+  const amiTlsValue = amiHost ? amiTls : 0;
 
   const now = new Date().toISOString();
   statements.updatePbx.run(
@@ -1434,12 +1745,72 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
     upstreamUser || null,
     upstreamPass || null,
     upstreamMacCase,
+    amiHost,
+    amiPort,
+    amiUsername,
+    amiPassword,
+    amiTlsValue,
     now,
     id
   );
 
   response.redirect(buildNoticeUrl("/admin", "notice", "PBX updated."));
 });
+
+app.post(
+  "/admin/pbx-servers/:id/test-ami",
+  requireAuth,
+  async (request, response) => {
+    const id = Number.parseInt(request.params.id, 10);
+    const pbx = statements.getPbx.get(id) as PbxServer | undefined;
+    if (!pbx) {
+      response.redirect(buildNoticeUrl("/admin", "error", "PBX not found."));
+      return;
+    }
+    if (!pbx.ami_host || !pbx.ami_username || !pbx.ami_password) {
+      response.redirect(
+        buildNoticeUrl(
+          "/admin",
+          "error",
+          "PBX AMI settings are incomplete."
+        )
+      );
+      return;
+    }
+
+    let client: Awaited<ReturnType<typeof createAmiClient>> | null = null;
+    try {
+      client = await createAmiClient({
+        host: pbx.ami_host,
+        port: pbx.ami_port || 5038,
+        useTls: pbx.ami_tls === 1,
+      });
+      const login = await client.sendAction({
+        Action: "Login",
+        Username: pbx.ami_username,
+        Secret: pbx.ami_password,
+        Events: "off",
+      });
+      if (login.Response !== "Success") {
+        throw new Error(login.Message || "AMI login failed.");
+      }
+      await client.sendAction({ Action: "Logoff" }).catch(() => undefined);
+      response.redirect(
+        buildNoticeUrl("/admin", "notice", "AMI connection successful.")
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "AMI connection failed.";
+      response.redirect(buildNoticeUrl("/admin", "error", message));
+    } finally {
+      if (client) {
+        client.close();
+      }
+    }
+  }
+);
 
 app.post(
   "/admin/pbx-servers/:id/delete",
@@ -1533,6 +1904,7 @@ app.post("/admin/devices", requireAuth, (request, response) => {
   const authPass = String(request.body.auth_pass || "");
   const displayName = String(request.body.display_name || "").trim();
   const model = String(request.body.model || "").trim();
+  const pjsipEndpoint = String(request.body.pjsip_endpoint || "").trim();
   const firmwareIdInput = parseInteger(request.body.firmware_id, 0);
   const firmwareUrlOverrideInput = String(
     request.body.firmware_url_override || ""
@@ -1595,6 +1967,7 @@ app.post("/admin/devices", requireAuth, (request, response) => {
       pbxServerId,
       lineNumber,
       model || null,
+      pjsipEndpoint || null,
       firmwareId,
       firmwareUrlOverride,
       0,
@@ -1628,6 +2001,7 @@ app.post("/admin/devices/:id", requireAuth, (request, response) => {
   const authPass = String(request.body.auth_pass || "");
   const displayName = String(request.body.display_name || "").trim();
   const model = String(request.body.model || "").trim();
+  const pjsipEndpoint = String(request.body.pjsip_endpoint || "").trim();
   const firmwareIdInput = parseInteger(request.body.firmware_id, 0);
   const firmwareUrlOverrideInput = String(
     request.body.firmware_url_override || ""
@@ -1690,6 +2064,7 @@ app.post("/admin/devices/:id", requireAuth, (request, response) => {
       pbxServerId,
       lineNumber,
       model || null,
+      pjsipEndpoint || null,
       firmwareId,
       firmwareUrlOverride,
       now,
@@ -1735,6 +2110,82 @@ app.post(
         "Firmware update queued for next provision."
       )
     );
+  }
+);
+
+app.post(
+  "/admin/devices/:id/notify",
+  requireAuth,
+  async (request, response) => {
+    const id = Number.parseInt(request.params.id, 10);
+    const device = statements.getDevice.get(id) as DeviceWithPbx | undefined;
+    if (!device) {
+      response.redirect(buildNoticeUrl("/admin", "error", "Device not found."));
+      return;
+    }
+    const endpoint = String(
+      device.pjsip_endpoint || device.auth_user || ""
+    ).trim();
+    if (!endpoint) {
+      response.redirect(
+        buildNoticeUrl(
+          "/admin",
+          "error",
+          "PJSIP endpoint is required to send check-sync."
+        )
+      );
+      return;
+    }
+    if (!device.pbx_ami_host || !device.pbx_ami_username || !device.pbx_ami_password) {
+      response.redirect(
+        buildNoticeUrl(
+          "/admin",
+          "error",
+          "PBX AMI settings are incomplete."
+        )
+      );
+      return;
+    }
+
+    let client: Awaited<ReturnType<typeof createAmiClient>> | null = null;
+    try {
+      client = await createAmiClient({
+        host: device.pbx_ami_host,
+        port: device.pbx_ami_port || 5038,
+        useTls: device.pbx_ami_tls === 1,
+      });
+      const login = await client.sendAction({
+        Action: "Login",
+        Username: device.pbx_ami_username,
+        Secret: device.pbx_ami_password,
+        Events: "off",
+      });
+      if (login.Response !== "Success") {
+        throw new Error(login.Message || "AMI login failed.");
+      }
+      const notify = await client.sendAction({
+        Action: "PJSIPNotify",
+        Endpoint: endpoint,
+        Event: "check-sync",
+      });
+      if (notify.Response !== "Success") {
+        throw new Error(notify.Message || "AMI notify failed.");
+      }
+      await client.sendAction({ Action: "Logoff" }).catch(() => undefined);
+      response.redirect(
+        buildNoticeUrl("/admin", "notice", "Check-sync sent via AMI.")
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "AMI notify failed.";
+      response.redirect(buildNoticeUrl("/admin", "error", message));
+    } finally {
+      if (client) {
+        client.close();
+      }
+    }
   }
 );
 

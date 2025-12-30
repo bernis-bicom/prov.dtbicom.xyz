@@ -106,6 +106,18 @@ If the upstream requires auth, set the PBX server "Upstream user/pass" fields.
 If your upstream uses uppercase MACs (e.g. `805E0C498ED9.cfg`), set "Upstream
 MAC case" to UPPERCASE.
 
+## Instant reprovisioning via AMI (PJSIP)
+
+If PBXware exposes AMI, you can trigger a SIP NOTIFY (check-sync) from the
+provisioning UI without needing the phone to manually reprovision:
+
+1. Fill AMI host/port/user/pass on the PBX server in `/admin`.
+2. Set each device PJSIP endpoint (often the auth user, e.g. `200100`).
+3. Click "Trigger check-sync" on the device card.
+
+This is useful for phones behind NAT because PBXware already knows the phone’s
+current registration contact.
+
 ## Environment variables
 
 - `ADMIN_USER`: admin username (default `admin`).
@@ -120,6 +132,7 @@ MAC case" to UPPERCASE.
 - `ACMEDNS_SUBDOMAIN`: acme-dns subdomain.
 - `ACMEDNS_SERVER_URL`: acme-dns API URL.
 - `UPSTREAM_TIMEOUT_MS`: upstream provisioning fetch timeout (default `4000`).
+- `AMI_TIMEOUT_MS`: AMI connect/response timeout in milliseconds (default `4000`).
 
 ## Data storage
 
