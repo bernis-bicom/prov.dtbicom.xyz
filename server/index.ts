@@ -41,6 +41,10 @@ const AMI_TIMEOUT_MS = Number.parseInt(
   process.env.AMI_TIMEOUT_MS || "4000",
   10
 );
+const LOG_PAGE_LIMIT = Number.parseInt(
+  process.env.LOG_PAGE_LIMIT || "500",
+  10
+);
 const DB_PATH =
   process.env.DB_PATH || path.join(projectRoot, "data", "provisioning.db");
 
@@ -115,6 +119,17 @@ db.exec(`
     fetched_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS provisioning_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    mac TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    user_agent TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT,
+    pbx TEXT
   );
 `);
 
@@ -293,6 +308,17 @@ type FirmwareCatalogInput = {
   source: string;
 };
 
+type ProvisionLogRow = {
+  id: number;
+  created_at: string;
+  mac: string;
+  ip: string;
+  user_agent: string;
+  status: string;
+  reason: string | null;
+  pbx: string | null;
+};
+
 type NoticeMessage = {
   type: "success" | "error";
   text: string;
@@ -404,6 +430,40 @@ const statements = {
     WHERE id = ?
   `),
   deleteDevice: db.prepare("DELETE FROM devices WHERE id = ?"),
+  insertProvisionLog: db.prepare(`
+    INSERT INTO provisioning_logs
+      (created_at, mac, ip, user_agent, status, reason, pbx)
+    VALUES
+      (?, ?, ?, ?, ?, ?, ?)
+  `),
+  listProvisionLogs: db.prepare(`
+    SELECT * FROM provisioning_logs
+    ORDER BY created_at DESC
+    LIMIT ?
+  `),
+  listProvisionLogsFiltered: db.prepare(`
+    SELECT * FROM provisioning_logs
+    WHERE mac LIKE ? COLLATE NOCASE
+       OR ip LIKE ? COLLATE NOCASE
+       OR user_agent LIKE ? COLLATE NOCASE
+       OR status LIKE ? COLLATE NOCASE
+       OR reason LIKE ? COLLATE NOCASE
+       OR pbx LIKE ? COLLATE NOCASE
+    ORDER BY created_at DESC
+    LIMIT ?
+  `),
+  getProvisionLogStats: db.prepare(
+    "SELECT COUNT(*) AS count FROM provisioning_logs"
+  ),
+  getProvisionLogCountFiltered: db.prepare(`
+    SELECT COUNT(*) AS count FROM provisioning_logs
+    WHERE mac LIKE ? COLLATE NOCASE
+       OR ip LIKE ? COLLATE NOCASE
+       OR user_agent LIKE ? COLLATE NOCASE
+       OR status LIKE ? COLLATE NOCASE
+       OR reason LIKE ? COLLATE NOCASE
+       OR pbx LIKE ? COLLATE NOCASE
+  `),
   listFirmware: db.prepare(
     "SELECT * FROM firmware_catalog ORDER BY vendor COLLATE NOCASE, model COLLATE NOCASE, version COLLATE NOCASE"
   ),
@@ -794,13 +854,26 @@ function logProvisioningAccess(entry: {
   reason?: string;
   pbx?: string;
 }): void {
-  console.info(
-    JSON.stringify({
-      ts: new Date().toISOString(),
-      event: "provision_request",
-      ...entry,
-    })
-  );
+  const timestamp = new Date().toISOString();
+  const payload = {
+    ts: timestamp,
+    event: "provision_request",
+    ...entry,
+  };
+  console.info(JSON.stringify(payload));
+  try {
+    statements.insertProvisionLog.run(
+      timestamp,
+      entry.mac,
+      entry.ip,
+      entry.userAgent,
+      entry.status,
+      entry.reason || null,
+      entry.pbx || null
+    );
+  } catch (error) {
+    console.warn("Failed to persist provisioning log.", error);
+  }
 }
 
 function getUpstreamAuthHeader(device: DeviceWithPbx): string | null {
@@ -927,7 +1000,7 @@ function formatTimestamp(value: string | null): string {
   return value.replace("T", " ").replace("Z", "");
 }
 
-type AdminNavKey = "overview" | "pbx" | "devices" | "firmware";
+type AdminNavKey = "overview" | "pbx" | "devices" | "firmware" | "logs" | "about";
 
 function getNoticeMessage(request: Request): NoticeMessage | null {
   const errorParam =
@@ -961,6 +1034,8 @@ function renderAdminShell({
     { key: "pbx", label: "PBX servers", href: "/admin/pbx" },
     { key: "devices", label: "Devices", href: "/admin/devices" },
     { key: "firmware", label: "Firmware", href: "/admin/firmware" },
+    { key: "logs", label: "Logs", href: "/admin/logs" },
+    { key: "about", label: "About", href: "/admin/about" },
   ];
   const navLinks = navItems
     .map(
@@ -1344,11 +1419,11 @@ function renderOverviewPage({
       <div class="provisioning-grid">
         <div class="provisioning-block">
           <span class="helper">Server URL</span>
-          <code class="mono">${escapeHtml(serverUrl)}</code>
+          <code class="mono code-block">${escapeHtml(serverUrl)}</code>
         </div>
         <div class="provisioning-block">
           <span class="helper">Phone pattern</span>
-          <code class="mono">${escapeHtml(provisionPattern)}</code>
+          <code class="mono code-block">${escapeHtml(provisionPattern)}</code>
         </div>
       </div>
       <div class="steps">
@@ -1375,6 +1450,10 @@ function renderOverviewPage({
         <a class="link-card" href="/admin/firmware">
           <strong>Firmware</strong>
           <span>Sync firmware URLs and trigger updates.</span>
+        </a>
+        <a class="link-card" href="/admin/logs">
+          <strong>Logs</strong>
+          <span>Review provisioning requests and outcomes.</span>
         </a>
       </div>
     </section>
@@ -1662,8 +1741,16 @@ function renderFirmwarePage({
   const firmwareLastSync = firmwareStats.last_fetched_at
     ? formatTimestamp(firmwareStats.last_fetched_at)
     : "Never";
-  const preview = firmwareCatalog.slice(0, 20);
-  const firmwareRows = preview
+  const filterInput =
+    typeof request.query.q === "string" ? request.query.q.trim() : "";
+  const normalizedFilter = filterInput.toLowerCase();
+  const filtered = normalizedFilter
+    ? firmwareCatalog.filter((entry) => {
+        const haystack = `${entry.vendor} ${entry.model} ${entry.version} ${entry.url}`.toLowerCase();
+        return haystack.includes(normalizedFilter);
+      })
+    : firmwareCatalog;
+  const firmwareRows = filtered
     .map(
       (entry) => `
         <div class="table-row">
@@ -1699,18 +1786,34 @@ function renderFirmwarePage({
     <section class="card">
       <div class="card-header">
         <h2>Latest entries</h2>
-        <p class="subhead">Showing ${preview.length} of ${escapeHtml(
-          firmwareCount
-        )} firmware entries.</p>
+        <p class="subhead">Showing ${escapeHtml(
+          filtered.length
+        )} of ${escapeHtml(firmwareCount)} firmware entries.</p>
       </div>
-      <div class="table">
+      <form method="get" action="/admin/firmware" class="form-grid form-grid--tight">
+        <label class="field">
+          <span>Filter</span>
+          <input name="q" type="text" value="${escapeHtml(filterInput)}" placeholder="Search vendor, model, version, URL" />
+        </label>
+        <div class="form-actions">
+          <button class="button button--ghost" type="submit">Apply filter</button>
+        </div>
+      </form>
+      <div class="table table--firmware">
         <div class="table-head">
           <span>Vendor</span>
           <span>Model</span>
           <span>Version</span>
           <span>URL</span>
         </div>
-        ${firmwareRows || "<p class=\"empty\">No firmware entries yet.</p>"}
+        ${
+          firmwareRows ||
+          `<p class="empty">${
+            filterInput
+              ? "No firmware entries match that filter."
+              : "No firmware entries yet."
+          }</p>`
+        }
       </div>
     </section>
   `;
@@ -1718,6 +1821,167 @@ function renderFirmwarePage({
     request,
     title: "Firmware",
     activeNav: "firmware",
+    header,
+    content,
+    message,
+  });
+}
+
+function renderLogsPage({
+  request,
+  logs,
+  totalCount,
+  filteredCount,
+  filterInput,
+  message,
+}: {
+  request: Request;
+  logs: ProvisionLogRow[];
+  totalCount: number;
+  filteredCount: number;
+  filterInput: string;
+  message: NoticeMessage | null;
+}): string {
+  const rows = logs
+    .map((entry) => {
+      const formattedMac = formatMac(entry.mac) || entry.mac;
+      const statusClass =
+        entry.status === "ok"
+          ? "tag tag--ok"
+          : entry.status === "unauthorized"
+            ? "tag tag--warn"
+            : entry.status === "not_found"
+              ? "tag tag--neutral"
+              : "tag tag--error";
+      return `
+        <div class="table-row">
+          <span>${escapeHtml(formatTimestamp(entry.created_at))}</span>
+          <span class="mono">${escapeHtml(formattedMac)}</span>
+          <span class="${statusClass}">${escapeHtml(entry.status)}</span>
+          <span>${escapeHtml(entry.pbx || "—")}</span>
+          <span class="mono">${escapeHtml(entry.ip)}</span>
+          <span class="table-url">${escapeHtml(entry.reason || "—")}</span>
+          <span class="table-url">${escapeHtml(entry.user_agent)}</span>
+        </div>
+      `;
+    })
+    .join("");
+  const header = `
+    <div>
+      <p class="eyebrow">Provisioning</p>
+      <h1 class="page-title">Logs</h1>
+      <p class="subhead">Review provisioning requests and their outcomes.</p>
+    </div>
+  `;
+  const content = `
+    <section class="card">
+      <div class="card-header">
+        <h2>Provisioning logs</h2>
+        <p class="subhead">Showing ${escapeHtml(
+          String(filteredCount)
+        )} of ${escapeHtml(String(totalCount))} entries (latest ${escapeHtml(
+          String(LOG_PAGE_LIMIT)
+        )}).</p>
+      </div>
+      <form method="get" action="/admin/logs" class="form-grid form-grid--tight">
+        <label class="field">
+          <span>Filter</span>
+          <input name="q" type="text" value="${escapeHtml(
+            filterInput
+          )}" placeholder="Search MAC, status, PBX, IP, user agent" />
+        </label>
+        <div class="form-actions">
+          <button class="button button--ghost" type="submit">Apply filter</button>
+        </div>
+      </form>
+      <div class="table table--logs">
+        <div class="table-head">
+          <span>Time</span>
+          <span>MAC</span>
+          <span>Status</span>
+          <span>PBX</span>
+          <span>IP</span>
+          <span>Reason</span>
+          <span>User Agent</span>
+        </div>
+        ${
+          rows ||
+          `<p class="empty">${
+            filterInput
+              ? "No log entries match that filter."
+              : "No provisioning logs yet."
+          }</p>`
+        }
+      </div>
+    </section>
+  `;
+  return renderAdminShell({
+    request,
+    title: "Logs",
+    activeNav: "logs",
+    header,
+    content,
+    message,
+  });
+}
+
+function renderAboutPage({
+  request,
+  message,
+}: {
+  request: Request;
+  message: NoticeMessage | null;
+}): string {
+  const host = request.get("host") ?? "localhost";
+  const baseUrl = `${request.protocol}://${host}`;
+  const serverUrl = `${baseUrl}/yealink/`;
+  const header = `
+    <div>
+      <p class="eyebrow">Provisioning</p>
+      <h1 class="page-title">About</h1>
+      <p class="subhead">How the Yealink Auto Provisioning Switchboard works.</p>
+    </div>
+  `;
+  const content = `
+    <section class="card">
+      <div class="card-header">
+        <h2>What this panel does</h2>
+        <p class="subhead">Centralizes provisioning data and delivers Yealink configs on demand.</p>
+      </div>
+      <div class="about-grid">
+        <div class="about-card">
+          <h3>Provisioning URL</h3>
+          <p>Phones fetch configs from <code class="mono code-block">${escapeHtml(
+            serverUrl
+          )}</code>. The phone appends its MAC plus <code>.cfg</code>.</p>
+        </div>
+        <div class="about-card">
+          <h3>PBX servers</h3>
+          <p>Store SIP transport, proxy, and provisioning credentials per PBX. Optional upstream proxying lets you reuse existing PBXware config bundles.</p>
+        </div>
+        <div class="about-card">
+          <h3>Devices</h3>
+          <p>Each device maps a MAC to SIP credentials, line number, and PBX server. The config is generated dynamically at request time.</p>
+        </div>
+        <div class="about-card">
+          <h3>AMI check-sync</h3>
+          <p>When AMI credentials are set, you can trigger <code>PJSIPNotify</code> to make phones pull new configs instantly.</p>
+        </div>
+        <div class="about-card">
+          <h3>Firmware updates</h3>
+          <p>Sync firmware URLs from 3CX, pick a model per device, and trigger one-shot updates. The firmware URL is merged into the config on the next provision.</p>
+        </div>
+        <div class="about-card">
+          <h3>Access & logs</h3>
+          <p>Admin access is protected by session cookies. Provisioning requests are logged with MAC, IP, and result.</p>
+        </div>
+      </div>
+    </section>
+  `;
+  return renderAdminShell({
+    request,
+    title: "About",
+    activeNav: "about",
     header,
     content,
     message,
@@ -1827,6 +2091,66 @@ app.get("/admin/firmware", requireAuth, (request, response) => {
       message,
     })
   );
+});
+
+app.get("/admin/logs", requireAuth, (request, response) => {
+  const message = getNoticeMessage(request);
+  const filterInput =
+    typeof request.query.q === "string" ? request.query.q.trim() : "";
+  const totalRow = statements.getProvisionLogStats.get() as
+    | { count: number }
+    | undefined;
+  const totalCount = totalRow?.count ?? 0;
+  if (filterInput) {
+    const query = `%${filterInput}%`;
+    const logs = statements.listProvisionLogsFiltered.all(
+      query,
+      query,
+      query,
+      query,
+      query,
+      query,
+      LOG_PAGE_LIMIT
+    ) as ProvisionLogRow[];
+    const filteredRow = statements.getProvisionLogCountFiltered.get(
+      query,
+      query,
+      query,
+      query,
+      query,
+      query
+    ) as { count: number } | undefined;
+    const filteredCount = filteredRow?.count ?? 0;
+    response.send(
+      renderLogsPage({
+        request,
+        logs,
+        totalCount,
+        filteredCount,
+        filterInput,
+        message,
+      })
+    );
+    return;
+  }
+  const logs = statements.listProvisionLogs.all(
+    LOG_PAGE_LIMIT
+  ) as ProvisionLogRow[];
+  response.send(
+    renderLogsPage({
+      request,
+      logs,
+      totalCount,
+      filteredCount: totalCount,
+      filterInput,
+      message,
+    })
+  );
+});
+
+app.get("/admin/about", requireAuth, (request, response) => {
+  const message = getNoticeMessage(request);
+  response.send(renderAboutPage({ request, message }));
 });
 
 app.post("/admin/login", (request, response) => {

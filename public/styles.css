@@ -220,6 +220,13 @@ body::after {
   gap: 6px;
 }
 
+.code-block {
+  display: block;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .steps {
   margin-top: 16px;
   display: grid;
@@ -274,7 +281,6 @@ body::after {
 
 .table-head {
   display: grid;
-  grid-template-columns: 1fr 1.2fr 0.8fr 2fr;
   gap: 12px;
   font-size: 0.7rem;
   text-transform: uppercase;
@@ -285,7 +291,6 @@ body::after {
 
 .table-row {
   display: grid;
-  grid-template-columns: 1fr 1.2fr 0.8fr 2fr;
   gap: 12px;
   align-items: center;
   padding: 10px 12px;
@@ -295,8 +300,44 @@ body::after {
   font-size: 0.9rem;
 }
 
+.table--firmware .table-head,
+.table--firmware .table-row {
+  grid-template-columns: 1fr 1.2fr 0.8fr 2fr;
+}
+
+.table--logs .table-head,
+.table--logs .table-row {
+  grid-template-columns: 1.2fr 1fr 0.9fr 1fr 1fr 1.2fr 2fr;
+}
+
 .table-url {
   word-break: break-all;
+}
+
+.about-grid {
+  margin-top: 16px;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.about-card {
+  background: #f9fafc;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+
+.about-card h3 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.about-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
 }
 
 .hero {
@@ -561,6 +602,26 @@ select:focus {
   font-size: 0.75rem;
   background: rgba(47, 211, 200, 0.14);
   color: #0b5a55;
+}
+
+.tag--ok {
+  background: rgba(47, 211, 200, 0.18);
+  color: #0b5a55;
+}
+
+.tag--warn {
+  background: rgba(245, 166, 35, 0.18);
+  color: #8a4c00;
+}
+
+.tag--neutral {
+  background: rgba(35, 48, 71, 0.12);
+  color: #3f4b61;
+}
+
+.tag--error {
+  background: rgba(234, 95, 85, 0.18);
+  color: #7d1c15;
 }
 
 .tag--pending {
