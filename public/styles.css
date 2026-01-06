@@ -527,6 +527,13 @@ body::after {
   padding-bottom: 14px;
 }
 
+.card-actions {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .form-grid {
   display: grid;
   gap: 14px;

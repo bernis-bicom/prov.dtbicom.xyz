@@ -7,7 +7,7 @@ Auto provisioning server for Yealink devices with a simple admin UI.
 - Admin UI at `/admin` with login + session cookies
 - SQLite-backed storage for PBX servers and device credentials
 - Dynamic Yealink config endpoint at `/yealink/{mac}.cfg`
-- Firmware catalog sync from 3CX (V20 + V18) with one-shot per-device updates
+- Local firmware catalog with one-shot per-device updates
 - Dockerized with Caddy reverse proxy (HTTPS on port 8443)
 
 ## Quick start (Docker + Caddy)
@@ -95,8 +95,8 @@ Note: because HTTPS is on port 8443, users must include the port in the URL.
 1. Add a PBX server (host, port, transport, optional outbound proxy).
 2. Add a device with MAC + SIP auth credentials.
 3. The device config is generated dynamically at `/yealink/{mac}.cfg`.
-4. Optional: sync firmware from 3CX, choose a firmware URL per device, and
-   trigger a one-shot update.
+4. Optional: import a firmware catalog once, upload additional firmware files,
+   choose a firmware URL per device, and trigger a one-shot update.
 
 If you want BLFs/keys managed by PBXware, set the PBX server "Upstream base
 URL" to the PBXware provisioning path (for example:
@@ -133,11 +133,16 @@ current registration contact.
 - `ACMEDNS_SERVER_URL`: acme-dns API URL.
 - `UPSTREAM_TIMEOUT_MS`: upstream provisioning fetch timeout (default `4000`).
 - `AMI_TIMEOUT_MS`: AMI connect/response timeout in milliseconds (default `4000`).
+- `LOG_PAGE_LIMIT`: max log entries shown per page (default `500`).
+- `FIRMWARE_DIR`: firmware file storage directory (default `data/firmware`).
+- `FIRMWARE_BASE_URL`: base URL for firmware downloads (optional).
+- `FIRMWARE_IMPORT_ENABLED`: set to `0` to hide the import button.
 
 ## Data storage
 
 SQLite database lives at `data/provisioning.db` when running locally or in the
 Docker volume `prov-data` when running the compose stack.
+Firmware files are stored under `data/firmware` (or `FIRMWARE_DIR`).
 
 ### Backup/restore (Docker volume)
 

@@ -4,9 +4,12 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import tls from "node:tls";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
+import multer from "multer";
 import type { NextFunction, Request, Response as ExpressResponse } from "express";
 import {
   formatMac,
@@ -47,10 +50,23 @@ const LOG_PAGE_LIMIT = Number.parseInt(
 );
 const DB_PATH =
   process.env.DB_PATH || path.join(projectRoot, "data", "provisioning.db");
+const FIRMWARE_DIR =
+  process.env.FIRMWARE_DIR ||
+  path.join(path.dirname(DB_PATH), "firmware");
+const FIRMWARE_BASE_URL = process.env.FIRMWARE_BASE_URL || "";
+const FIRMWARE_IMPORT_ENABLED =
+  process.env.FIRMWARE_IMPORT_ENABLED !== "0";
 
 const dataDir = path.dirname(DB_PATH);
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
+}
+if (!fs.existsSync(FIRMWARE_DIR)) {
+  fs.mkdirSync(FIRMWARE_DIR, { recursive: true });
+}
+const firmwareTmpDir = path.join(FIRMWARE_DIR, ".tmp");
+if (!fs.existsSync(firmwareTmpDir)) {
+  fs.mkdirSync(firmwareTmpDir, { recursive: true });
 }
 
 const db = new Database(DB_PATH);
@@ -132,6 +148,11 @@ db.exec(`
     status TEXT NOT NULL,
     reason TEXT,
     pbx TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
   );
 `);
 
@@ -313,7 +334,6 @@ type FirmwareCatalogInput = {
   model: string;
   version: string;
   url: string;
-  source: string;
 };
 
 type ProvisionLogRow = {
@@ -485,6 +505,21 @@ const statements = {
     "SELECT COUNT(*) AS count, MAX(fetched_at) AS last_fetched_at FROM firmware_catalog"
   ),
   getFirmware: db.prepare("SELECT * FROM firmware_catalog WHERE id = ?"),
+  getFirmwareByKey: db.prepare(
+    "SELECT * FROM firmware_catalog WHERE vendor = ? AND model = ? AND version = ?"
+  ),
+  deleteFirmwareByKey: db.prepare(
+    "DELETE FROM firmware_catalog WHERE vendor = ? AND model = ? AND version = ?"
+  ),
+  purgeExternalFirmware: db.prepare(
+    "DELETE FROM firmware_catalog WHERE url LIKE ? OR source LIKE ?"
+  ),
+  insertFirmware: db.prepare(`
+    INSERT INTO firmware_catalog
+      (vendor, model, version, url, source, fetched_at, created_at, updated_at)
+    VALUES
+      (?, ?, ?, ?, ?, ?, ?, ?)
+  `),
   upsertFirmware: db.prepare(`
     INSERT INTO firmware_catalog
       (vendor, model, version, url, source, fetched_at, created_at, updated_at)
@@ -516,6 +551,12 @@ const statements = {
   deleteExpiredSessions: db.prepare(
     "DELETE FROM sessions WHERE expires_at <= ?"
   ),
+  getSetting: db.prepare("SELECT value FROM settings WHERE key = ?"),
+  setSetting: db.prepare(`
+    INSERT INTO settings (key, value)
+    VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `),
 };
 
 const app = express();
@@ -523,10 +564,17 @@ app.set("trust proxy", true);
 app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser());
 app.use("/assets", express.static(path.join(projectRoot, "public")));
+app.use(
+  "/firmware",
+  express.static(FIRMWARE_DIR, { dotfiles: "ignore" })
+);
 
 if (ADMIN_PASS === "change-me") {
   console.warn("ADMIN_PASS is set to the default; update it before production use.");
 }
+
+const FIRMWARE_SOURCE = "local";
+const firmwareUpload = multer({ dest: firmwareTmpDir });
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -559,6 +607,61 @@ function normalizeUrl(value: string): string | null {
   }
 }
 
+function sanitizeFileComponent(value: string): string {
+  const cleaned = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return cleaned || "firmware";
+}
+
+function sanitizeExtension(value: string): string {
+  const cleaned = value.toLowerCase().replace(/[^a-z0-9.]/g, "");
+  if (!cleaned) return ".bin";
+  return cleaned.startsWith(".") ? cleaned : `.${cleaned}`;
+}
+
+function buildFirmwareFileName(params: {
+  vendor: string;
+  model: string;
+  version: string;
+  extension: string;
+}): string {
+  const vendor = sanitizeFileComponent(params.vendor);
+  const model = sanitizeFileComponent(params.model);
+  const version = sanitizeFileComponent(params.version);
+  const extension = sanitizeExtension(params.extension);
+  return `${vendor}_${model}_${version}${extension}`;
+}
+
+function getFirmwareBaseUrl(request: Request): string {
+  if (FIRMWARE_BASE_URL) {
+    return FIRMWARE_BASE_URL.replace(/\/+$/, "");
+  }
+  const host = request.get("host") ?? "localhost";
+  return `${request.protocol}://${host}/firmware`;
+}
+
+async function downloadToFile(url: string, filePath: string): Promise<void> {
+  const response = await fetch(url, {
+    headers: { "user-agent": "AutoProv Switchboard firmware import" },
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(`Download failed (${response.status})`);
+  }
+  const tempPath = `${filePath}.tmp-${crypto.randomUUID()}`;
+  try {
+    await pipeline(
+      Readable.fromWeb(response.body as any),
+      fs.createWriteStream(tempPath)
+    );
+    await fs.promises.rename(tempPath, filePath);
+  } catch (error) {
+    await fs.promises.rm(tempPath, { force: true });
+    throw error;
+  }
+}
+
 function decodeHtml(value: string): string {
   return value
     .replace(/&amp;/g, "&")
@@ -574,10 +677,7 @@ function cleanHtmlText(value: string): string {
     .trim();
 }
 
-function parse3cxFirmwareCatalog(
-  html: string,
-  source: string
-): FirmwareCatalogInput[] {
+function parseFirmwareCatalog(html: string, baseUrl: string): FirmwareCatalogInput[] {
   const tableMatch = html.match(
     /<table class="firmwares"[^>]*>([\s\S]*?)<\/table>/i
   );
@@ -594,7 +694,7 @@ function parse3cxFirmwareCatalog(
     if (!model || !version || !urlRaw) continue;
     let url: string;
     try {
-      url = new URL(urlRaw, "https://www.3cx.com").toString();
+      url = new URL(urlRaw, baseUrl).toString();
     } catch (error) {
       continue;
     }
@@ -604,7 +704,6 @@ function parse3cxFirmwareCatalog(
       model,
       version,
       url,
-      source,
     });
   }
   return entries;
@@ -1459,7 +1558,7 @@ function renderOverviewPage({
       <div class="summary-card">
         <p class="summary-label">Firmware catalog</p>
         <p class="summary-value">${firmwareCount}</p>
-        <p class="summary-meta">Last sync: ${escapeHtml(firmwareLastSync)}</p>
+        <p class="summary-meta">Last update: ${escapeHtml(firmwareLastSync)}</p>
       </div>
     </section>
 
@@ -1501,7 +1600,7 @@ function renderOverviewPage({
         </a>
         <a class="link-card" href="/admin/firmware">
           <strong>Firmware</strong>
-          <span>Sync firmware URLs and trigger updates.</span>
+          <span>Manage firmware files and trigger updates.</span>
         </a>
         <a class="link-card" href="/admin/logs">
           <strong>Logs</strong>
@@ -1791,11 +1890,13 @@ function renderFirmwarePage({
   request,
   firmwareCatalog,
   firmwareStats,
+  firmwareImportedAt,
   message,
 }: {
   request: Request;
   firmwareCatalog: FirmwareCatalogEntry[];
   firmwareStats: { count: number; last_fetched_at: string | null };
+  firmwareImportedAt: string | null;
   message: NoticeMessage | null;
 }): string {
   const firmwareCount = firmwareStats.count || 0;
@@ -1827,26 +1928,68 @@ function renderFirmwarePage({
     <div>
       <p class="eyebrow">Provisioning</p>
       <h1 class="page-title">Firmware</h1>
-      <p class="subhead">Sync and manage firmware URLs for one-shot updates.</p>
+      <p class="subhead">Manage firmware URLs for one-shot updates.</p>
     </div>
   `;
+  const importReady = FIRMWARE_IMPORT_ENABLED && !firmwareImportedAt;
   const content = `
     <section class="card">
       <div class="card-header">
         <h2>Firmware catalog</h2>
-        <p class="subhead">Sync firmware URLs from 3CX (V20 + V18).</p>
+        <p class="subhead">Manage firmware files hosted on this server.</p>
         <p class="helper">Entries: ${escapeHtml(
           firmwareCount
-        )} &bull; Last sync: ${escapeHtml(firmwareLastSync)}</p>
+        )} &bull; Last change: ${escapeHtml(firmwareLastSync)}</p>
+        ${
+          firmwareImportedAt
+            ? `<p class="helper">Import completed: ${escapeHtml(
+                formatTimestamp(firmwareImportedAt)
+              )}</p>`
+            : ""
+        }
       </div>
-      <form method="post" action="/admin/firmware/sync" class="form-grid form-grid--tight">
-        <button class="button" type="submit">Sync from 3CX</button>
+      <div class="card-actions">
+        <form method="post" action="/admin/firmware/import" class="form-grid form-grid--tight">
+          <button class="button" type="submit"${
+            importReady ? "" : " disabled"
+          }>Import firmware catalog</button>
+        </form>
+        <p class="helper">One-time import downloads firmware into local storage. Leave this page open while it runs.</p>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <h2>Add firmware</h2>
+        <p class="subhead">Upload a firmware file and map it to a model + version.</p>
+        <p class="helper">Uploading the same vendor/model/version replaces the existing entry.</p>
+      </div>
+      <form method="post" action="/admin/firmware/upload" enctype="multipart/form-data" class="form-grid">
+        <label class="field">
+          <span>Vendor</span>
+          <input name="vendor" type="text" placeholder="Yealink" required />
+        </label>
+        <label class="field">
+          <span>Model</span>
+          <input name="model" type="text" placeholder="T43U" required />
+        </label>
+        <label class="field">
+          <span>Version</span>
+          <input name="version" type="text" placeholder="108.86.0.93" required />
+        </label>
+        <label class="field">
+          <span>Firmware file</span>
+          <input name="file" type="file" required />
+        </label>
+        <div class="form-actions">
+          <button class="button" type="submit">Upload firmware</button>
+        </div>
       </form>
     </section>
 
     <section class="card">
       <div class="card-header">
-        <h2>Latest entries</h2>
+        <h2>Firmware entries</h2>
         <p class="subhead">Showing ${escapeHtml(
           filtered.length
         )} of ${escapeHtml(firmwareCount)} firmware entries.</p>
@@ -2032,7 +2175,7 @@ function renderAboutPage({
         </div>
         <div class="about-card">
           <h3>Firmware updates</h3>
-          <p>Sync firmware URLs from 3CX, pick a model per device, and trigger one-shot updates. The firmware URL is merged into the config on the next provision.</p>
+          <p>Upload firmware files, map them to models, and trigger one-shot updates. The firmware URL is merged into the config on the next provision.</p>
         </div>
         <div class="about-card">
           <h3>Access & logs</h3>
@@ -2142,6 +2285,10 @@ app.get("/admin/firmware", requireAuth, (request, response) => {
   const firmwareStatsRow = statements.getFirmwareStats.get() as
     | { count: number; last_fetched_at: string | null }
     | undefined;
+  const importedRow = statements.getSetting.get(
+    "firmware_imported_at"
+  ) as { value: string } | undefined;
+  const firmwareImportedAt = importedRow?.value ?? null;
   const firmwareStats = {
     count: firmwareStatsRow?.count ?? 0,
     last_fetched_at: firmwareStatsRow?.last_fetched_at ?? null,
@@ -2151,6 +2298,7 @@ app.get("/admin/firmware", requireAuth, (request, response) => {
       request,
       firmwareCatalog,
       firmwareStats,
+      firmwareImportedAt,
       message,
     })
   );
@@ -2549,79 +2697,190 @@ app.post(
   }
 );
 
-app.post("/admin/firmware/sync", requireAuth, async (_request, response) => {
+app.post("/admin/firmware/import", requireAuth, async (request, response) => {
+  if (!FIRMWARE_IMPORT_ENABLED) {
+    response.redirect(
+      buildNoticeUrl("/admin/firmware", "error", "Firmware import is disabled.")
+    );
+    return;
+  }
   try {
+    const seedUrls = [
+      "https://www.3cx.com/docs/phone-firmwares/",
+      "https://www.3cx.com/docs/phone-firmware-v18/",
+    ];
     const fetchOptions = {
-      headers: { "user-agent": "prov-dtbicom-xyz firmware sync" },
+      headers: { "user-agent": "AutoProv Switchboard firmware import" },
     };
-    const [v20Response, v18Response] = await Promise.all([
-      fetch("https://www.3cx.com/docs/phone-firmwares/", fetchOptions),
-      fetch("https://www.3cx.com/docs/phone-firmware-v18/", fetchOptions),
-    ]);
-    if (!v20Response.ok || !v18Response.ok) {
-      const status = !v20Response.ok
-        ? v20Response.status
-        : v18Response.status;
+    const responses = await Promise.all(
+      seedUrls.map((url) => fetch(url, fetchOptions))
+    );
+    const failedResponse = responses.find((res) => !res.ok);
+    if (failedResponse) {
       response.redirect(
         buildNoticeUrl(
           "/admin/firmware",
           "error",
-          `Firmware sync failed (${status}).`
+          `Firmware import failed (${failedResponse.status}).`
         )
       );
       return;
     }
-    const [v20Html, v18Html] = await Promise.all([
-      v20Response.text(),
-      v18Response.text(),
-    ]);
-    const parsed = [
-      ...parse3cxFirmwareCatalog(v20Html, "3cx-v20"),
-      ...parse3cxFirmwareCatalog(v18Html, "3cx-v18"),
-    ];
+    const htmlPages = await Promise.all(responses.map((res) => res.text()));
+    const parsed = htmlPages.flatMap((html, index) =>
+      parseFirmwareCatalog(html, seedUrls[index] || "")
+    );
     if (!parsed.length) {
       response.redirect(
-        buildNoticeUrl("/admin/firmware", "error", "No firmware entries found.")
+        buildNoticeUrl(
+          "/admin/firmware",
+          "error",
+          "No firmware entries found."
+        )
       );
       return;
     }
     const unique = new Map<string, FirmwareCatalogInput>();
     for (const entry of parsed) {
-      const key = `${entry.model}||${entry.version}||${entry.url}||${entry.source}`;
+      const key = `${entry.vendor}||${entry.model}||${entry.version}`;
       if (!unique.has(key)) {
         unique.set(key, entry);
       }
     }
     const entries = Array.from(unique.values());
+    const baseUrl = getFirmwareBaseUrl(request);
     const now = new Date().toISOString();
-    const insertEntries = db.transaction((rows: FirmwareCatalogInput[]) => {
-      for (const row of rows) {
-        statements.upsertFirmware.run(
-          row.vendor,
-          row.model,
-          row.version,
-          row.url,
-          row.source,
-          now,
-          now,
-          now
-        );
+    let successCount = 0;
+    let failureCount = 0;
+    const concurrency = 4;
+    const queue = entries.slice();
+
+    const workers = Array.from({ length: concurrency }, async () => {
+      while (queue.length) {
+        const entry = queue.shift();
+        if (!entry) break;
+        try {
+          const extension = sanitizeExtension(
+            path.extname(new URL(entry.url).pathname || "")
+          );
+          const fileName = buildFirmwareFileName({
+            vendor: entry.vendor,
+            model: entry.model,
+            version: entry.version,
+            extension,
+          });
+          const filePath = path.join(FIRMWARE_DIR, fileName);
+          await downloadToFile(entry.url, filePath);
+          const localUrl = `${baseUrl}/${encodeURIComponent(fileName)}`;
+          const transaction = db.transaction(() => {
+            statements.deleteFirmwareByKey.run(
+              entry.vendor,
+              entry.model,
+              entry.version
+            );
+            statements.insertFirmware.run(
+              entry.vendor,
+              entry.model,
+              entry.version,
+              localUrl,
+              FIRMWARE_SOURCE,
+              now,
+              now,
+              now
+            );
+          });
+          transaction();
+          successCount += 1;
+        } catch (error) {
+          failureCount += 1;
+        }
       }
     });
-    insertEntries(entries);
+
+    await Promise.all(workers);
+    if (successCount === 0) {
+      response.redirect(
+        buildNoticeUrl(
+          "/admin/firmware",
+          "error",
+          "Firmware import failed (no files downloaded)."
+        )
+      );
+      return;
+    }
+    statements.purgeExternalFirmware.run("%3cx.com%", "3cx%");
+    statements.setSetting.run("firmware_imported_at", now);
     response.redirect(
       buildNoticeUrl(
         "/admin/firmware",
         "notice",
-        `Firmware sync complete (${entries.length} entries).`
+        `Firmware import complete (${successCount} ok, ${failureCount} failed).`
       )
     );
   } catch (error) {
     response.redirect(
-      buildNoticeUrl("/admin/firmware", "error", "Firmware sync failed.")
+      buildNoticeUrl("/admin/firmware", "error", "Firmware import failed.")
     );
   }
 });
+
+app.post(
+  "/admin/firmware/upload",
+  requireAuth,
+  firmwareUpload.single("file"),
+  async (request, response) => {
+    const vendor = String(request.body.vendor || "").trim();
+    const model = String(request.body.model || "").trim();
+    const version = String(request.body.version || "").trim();
+    const file = request.file;
+    if (!vendor || !model || !version || !file) {
+      if (file?.path) {
+        fs.promises.unlink(file.path).catch(() => undefined);
+      }
+      response.redirect(
+        buildNoticeUrl("/admin/firmware", "error", "Invalid firmware data.")
+      );
+      return;
+    }
+    const extension = sanitizeExtension(path.extname(file.originalname || ""));
+    const fileName = buildFirmwareFileName({
+      vendor,
+      model,
+      version,
+      extension,
+    });
+    const filePath = path.join(FIRMWARE_DIR, fileName);
+    try {
+      await fs.promises.rm(filePath, { force: true });
+      await fs.promises.rename(file.path, filePath);
+    } catch (error) {
+      await fs.promises
+        .copyFile(file.path, filePath)
+        .then(() => fs.promises.unlink(file.path))
+        .catch(() => undefined);
+    }
+    const baseUrl = getFirmwareBaseUrl(request);
+    const localUrl = `${baseUrl}/${encodeURIComponent(fileName)}`;
+    const now = new Date().toISOString();
+    const transaction = db.transaction(() => {
+      statements.deleteFirmwareByKey.run(vendor, model, version);
+      statements.insertFirmware.run(
+        vendor,
+        model,
+        version,
+        localUrl,
+        FIRMWARE_SOURCE,
+        now,
+        now,
+        now
+      );
+    });
+    transaction();
+    response.redirect(
+      buildNoticeUrl("/admin/firmware", "notice", "Firmware uploaded.")
+    );
+  }
+);
 
 app.post("/admin/devices", requireAuth, (request, response) => {
   const mac = normalizeMac(request.body.mac);
