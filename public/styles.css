@@ -101,7 +101,7 @@ body::after {
   flex-direction: column;
   gap: 18px;
   position: sticky;
-  top: 24px;
+  top: 32px;
   align-self: start;
   overflow-x: hidden;
 }
