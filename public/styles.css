@@ -279,6 +279,15 @@ body::after {
   gap: 10px;
 }
 
+.table-scroll {
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+
+.table-scroll .table {
+  min-width: 920px;
+}
+
 .table-head {
   display: grid;
   gap: 12px;
