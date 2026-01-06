@@ -927,43 +927,89 @@ function formatTimestamp(value: string | null): string {
   return value.replace("T", " ").replace("Z", "");
 }
 
-function renderAdminPage({
+type AdminNavKey = "overview" | "pbx" | "devices" | "firmware";
+
+function getNoticeMessage(request: Request): NoticeMessage | null {
+  const errorParam =
+    typeof request.query.error === "string" ? request.query.error : null;
+  const noticeParam =
+    typeof request.query.notice === "string" ? request.query.notice : null;
+  return errorParam
+    ? { type: "error", text: errorParam }
+    : noticeParam
+      ? { type: "success", text: noticeParam }
+      : null;
+}
+
+function renderAdminShell({
   request,
-  pbxServers,
-  devices,
-  firmwareCatalog,
-  firmwareStats,
+  title,
+  activeNav,
+  header,
+  content,
   message,
 }: {
   request: Request;
-  pbxServers: PbxServer[];
-  devices: DeviceWithPbx[];
-  firmwareCatalog: FirmwareCatalogEntry[];
-  firmwareStats: { count: number; last_fetched_at: string | null };
+  title: string;
+  activeNav: AdminNavKey;
+  header: string;
+  content: string;
   message: NoticeMessage | null;
 }): string {
-  const host = request.get("host") ?? "localhost";
-  const baseUrl = `${request.protocol}://${host}`;
-  const provisionPattern = `${baseUrl}/yealink/{mac}.cfg`;
-  const pbxOptions = pbxServers
+  const navItems: { key: AdminNavKey; label: string; href: string }[] = [
+    { key: "overview", label: "Overview", href: "/admin/overview" },
+    { key: "pbx", label: "PBX servers", href: "/admin/pbx" },
+    { key: "devices", label: "Devices", href: "/admin/devices" },
+    { key: "firmware", label: "Firmware", href: "/admin/firmware" },
+  ];
+  const navLinks = navItems
     .map(
-      (server) =>
-        `<option value="${server.id}">${escapeHtml(
-          `${server.name} (${server.host})`
-        )}</option>`
+      (item) =>
+        `<a class="nav-link${
+          item.key === activeNav ? " nav-link--active" : ""
+        }" href="${item.href}">${escapeHtml(item.label)}</a>`
     )
     .join("");
-  const firmwareOptionsAll = buildFirmwareOptions(
-    firmwareCatalog,
-    null,
-    null
-  );
-  const firmwareCount = firmwareStats.count || 0;
-  const firmwareLastSync = firmwareStats.last_fetched_at
-    ? formatTimestamp(firmwareStats.last_fetched_at)
-    : "Never";
+  const shell = `
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <div class="logo">P</div>
+          <div>
+            <p class="eyebrow">Provisioning</p>
+            <p class="brand-title">Auto Provisioning</p>
+          </div>
+        </div>
+        <nav class="nav">
+          ${navLinks}
+        </nav>
+        <div class="sidebar-footer">
+          <p class="attribution">Built by Bernis@Bicom</p>
+          <form method="post" action="/admin/logout" class="inline-form">
+            <button class="button button--ghost" type="submit">Log out</button>
+          </form>
+        </div>
+      </aside>
+      <div class="content">
+        <header class="page-header">
+          ${header}
+        </header>
+        <main class="page-main">
+          ${content}
+        </main>
+      </div>
+    </div>
+  `;
+  return renderLayout({
+    title,
+    bodyClass: "admin",
+    content: shell,
+    message,
+  });
+}
 
-  const pbxRows = pbxServers
+function buildPbxRows(pbxServers: PbxServer[]): string {
+  return pbxServers
     .map((server, index) => {
       const delay = 120 + index * 40;
       return `
@@ -1095,8 +1141,20 @@ function renderAdminPage({
       `;
     })
     .join("");
+}
 
-  const deviceRows = devices
+function buildDeviceRows({
+  devices,
+  pbxServers,
+  firmwareCatalog,
+  baseUrl,
+}: {
+  devices: DeviceWithPbx[];
+  pbxServers: PbxServer[];
+  firmwareCatalog: FirmwareCatalogEntry[];
+  baseUrl: string;
+}): string {
+  return devices
     .map((device, index) => {
       const delay = 140 + index * 40;
       const firmwareOptions = buildFirmwareOptions(
@@ -1229,228 +1287,438 @@ function renderAdminPage({
       `;
     })
     .join("");
+}
 
-  const content = `
-    <header class="hero reveal" style="--delay:60ms">
-      <div class="hero-main">
-        <div class="brand">
-          <div class="logo">P</div>
-          <div>
-            <p class="eyebrow">Provisioning</p>
-            <h1>Yealink Auto Provisioning Switchboard</h1>
-            <p class="subhead">Manage PBX servers and push Yealink configs instantly.</p>
-            <p class="helper">Yealink server URL: ${escapeHtml(
-              `${baseUrl}/yealink/`
-            )} (phone appends its MAC + .cfg)</p>
-            <p class="attribution">Built by Bernis@Bicom</p>
-          </div>
-        </div>
-        <div class="hero-meta">
-          <div class="metric">
-            <span>${pbxServers.length}</span>
-            <span class="label">PBX servers</span>
-          </div>
-          <div class="metric">
-            <span>${devices.length}</span>
-            <span class="label">Devices</span>
-          </div>
-        </div>
-      </div>
-      <div class="hero-secondary">
-        <div class="pattern">
-          <p>Provisioning URL pattern</p>
-          <code>${escapeHtml(provisionPattern)}</code>
-        </div>
-        <form method="post" action="/admin/logout" class="inline-form">
-          <button class="button button--ghost" type="submit">Log out</button>
-        </form>
-      </div>
-    </header>
-
-    <main class="shell">
-      <section class="card reveal" style="--delay:100ms">
-        <div class="card-header">
-          <h2>Firmware catalog</h2>
-          <p class="subhead">Sync firmware URLs from 3CX (V20 + V18) and target one-shot updates per device.</p>
-          <p class="helper">Entries: ${escapeHtml(
-            firmwareCount
-          )} &bull; Last sync: ${escapeHtml(firmwareLastSync)}</p>
-        </div>
-        <form method="post" action="/admin/firmware/sync" class="form-grid form-grid--tight">
-          <button class="button" type="submit">Sync from 3CX</button>
-        </form>
-      </section>
-
-      <section class="card reveal" style="--delay:120ms">
-        <div class="card-header">
-          <h2>PBX servers</h2>
-          <p class="subhead">Store connection details and transport for each PBX.</p>
-          <p class="helper">Use upstream settings if PBXware already hosts full Yealink configs (BLFs, keys, etc.). Base URL should point to the folder containing MAC.cfg; choose MAC case + upstream auth if needed.</p>
-          <p class="helper">AMI settings enable check-sync notifications (PJSIPNotify) for instant reprovisioning.</p>
-          <p class="helper">Use "Test AMI" after saving to verify the credentials before triggering check-sync.</p>
-        </div>
-        <form method="post" action="/admin/pbx-servers" class="form-grid">
-          <label class="field">
-            <span>Name</span>
-            <input name="name" type="text" placeholder="PBXware DC1" required />
-          </label>
-          <label class="field">
-            <span>Host</span>
-            <input name="host" type="text" placeholder="pbx.dtbicom.xyz" required />
-          </label>
-          <label class="field">
-            <span>Port</span>
-            <input name="port" type="number" min="1" max="65535" value="5060" required />
-          </label>
-          <label class="field">
-            <span>Transport</span>
-            <select name="transport" required>
-              <option value="udp" selected>UDP</option>
-              <option value="tcp">TCP</option>
-              <option value="tls">TLS</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>Proxy host</span>
-            <input name="outbound_proxy_host" type="text" placeholder="Optional" />
-          </label>
-          <label class="field">
-            <span>Proxy port</span>
-            <input name="outbound_proxy_port" type="number" min="1" max="65535" placeholder="Optional" />
-          </label>
-          <label class="field">
-            <span>Prov user</span>
-            <input name="prov_username" type="text" placeholder="Optional" />
-          </label>
-          <label class="field">
-            <span>Prov pass</span>
-            <input name="prov_password" type="password" placeholder="Optional" />
-          </label>
-          <label class="field">
-            <span>Upstream base URL</span>
-            <input name="upstream_base_url" type="url" placeholder="https://pbx.example.com/prov/yealink/" />
-          </label>
-          <label class="field">
-            <span>Upstream user</span>
-            <input name="upstream_username" type="text" placeholder="Optional" />
-          </label>
-          <label class="field">
-            <span>Upstream pass</span>
-            <input name="upstream_password" type="password" placeholder="Optional" />
-          </label>
-          <label class="field">
-            <span>Upstream MAC case</span>
-            <select name="upstream_mac_case">
-              <option value="lower" selected>lowercase</option>
-              <option value="upper">UPPERCASE</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>AMI host</span>
-            <input name="ami_host" type="text" placeholder="pbx.dtbicom.xyz" />
-          </label>
-          <label class="field">
-            <span>AMI port</span>
-            <input name="ami_port" type="number" min="1" max="65535" value="5038" />
-          </label>
-          <label class="field">
-            <span>AMI user</span>
-            <input name="ami_username" type="text" placeholder="Optional" />
-          </label>
-          <label class="field">
-            <span>AMI pass</span>
-            <input name="ami_password" type="password" placeholder="Optional" />
-          </label>
-          <label class="field">
-            <span>AMI TLS</span>
-            <select name="ami_tls">
-              <option value="0" selected>Disabled</option>
-              <option value="1">Enabled</option>
-            </select>
-          </label>
-          <div class="form-actions">
-            <button class="button" type="submit">Add server</button>
-          </div>
-        </form>
-        <div class="list">
-          ${pbxRows || "<p class=\"empty\">No PBX servers yet.</p>"}
-        </div>
-      </section>
-
-      <section class="card reveal" style="--delay:160ms">
-        <div class="card-header">
-          <h2>Devices</h2>
-          <p class="subhead">Pair a MAC address with SIP credentials and a PBX.</p>
-          <p class="helper">Firmware updates are one-shot and apply on the next provisioning request.</p>
-          <p class="helper">Check-sync notifications require AMI credentials on the PBX and a PJSIP endpoint.</p>
-        </div>
-        <form method="post" action="/admin/devices" class="form-grid">
-          <label class="field">
-            <span>Label</span>
-            <input name="label" type="text" placeholder="Front desk" />
-          </label>
-          <label class="field">
-            <span>MAC</span>
-            <input name="mac" type="text" placeholder="00:11:22:33:44:55" required />
-          </label>
-          <label class="field">
-            <span>Extension</span>
-            <input name="extension" type="text" placeholder="1001" required />
-          </label>
-          <label class="field">
-            <span>Auth user</span>
-            <input name="auth_user" type="text" placeholder="1001" required />
-          </label>
-          <label class="field">
-            <span>Auth pass</span>
-            <input name="auth_pass" type="password" placeholder="Secret" required />
-          </label>
-          <label class="field">
-            <span>Display name</span>
-            <input name="display_name" type="text" placeholder="Optional" />
-          </label>
-          <label class="field">
-            <span>Model</span>
-            <input name="model" type="text" placeholder="Yealink T43U" />
-          </label>
-          <label class="field">
-            <span>PJSIP endpoint</span>
-            <input name="pjsip_endpoint" type="text" placeholder="200100" />
-          </label>
-          <label class="field">
-            <span>Firmware</span>
-            <select name="firmware_id">
-              ${firmwareOptionsAll}
-            </select>
-          </label>
-          <label class="field">
-            <span>Firmware override URL</span>
-            <input name="firmware_url_override" type="url" placeholder="https://example.com/fw.rom" />
-          </label>
-          <label class="field">
-            <span>PBX server</span>
-            <select name="pbx_server_id" required>
-              ${pbxOptions || "<option value=\"\">Add a PBX first</option>"}
-            </select>
-          </label>
-          <label class="field">
-            <span>Line</span>
-            <input name="line_number" type="number" min="1" max="16" value="1" />
-          </label>
-          <div class="form-actions">
-            <button class="button" type="submit" ${pbxServers.length ? "" : "disabled"}>Add device</button>
-          </div>
-        </form>
-        <div class="list">
-          ${deviceRows || "<p class=\"empty\">No devices yet.</p>"}
-        </div>
-      </section>
-    </main>
+function renderOverviewPage({
+  request,
+  pbxServers,
+  devices,
+  firmwareStats,
+  message,
+}: {
+  request: Request;
+  pbxServers: PbxServer[];
+  devices: DeviceWithPbx[];
+  firmwareStats: { count: number; last_fetched_at: string | null };
+  message: NoticeMessage | null;
+}): string {
+  const host = request.get("host") ?? "localhost";
+  const baseUrl = `${request.protocol}://${host}`;
+  const provisionPattern = `${baseUrl}/yealink/{mac}.cfg`;
+  const serverUrl = `${baseUrl}/yealink/`;
+  const firmwareCount = firmwareStats.count || 0;
+  const firmwareLastSync = firmwareStats.last_fetched_at
+    ? formatTimestamp(firmwareStats.last_fetched_at)
+    : "Never";
+  const header = `
+    <div>
+      <p class="eyebrow">Provisioning</p>
+      <h1 class="page-title">Overview</h1>
+      <p class="subhead">Track your provisioning status and jump into setup.</p>
+    </div>
   `;
+  const content = `
+    <section class="summary-grid">
+      <div class="summary-card">
+        <p class="summary-label">PBX servers</p>
+        <p class="summary-value">${pbxServers.length}</p>
+        <p class="summary-meta">Configured systems</p>
+      </div>
+      <div class="summary-card">
+        <p class="summary-label">Devices</p>
+        <p class="summary-value">${devices.length}</p>
+        <p class="summary-meta">Active endpoints</p>
+      </div>
+      <div class="summary-card">
+        <p class="summary-label">Firmware catalog</p>
+        <p class="summary-value">${firmwareCount}</p>
+        <p class="summary-meta">Last sync: ${escapeHtml(firmwareLastSync)}</p>
+      </div>
+    </section>
 
-  return renderLayout({
-    title: "Provisioning Admin",
-    bodyClass: "admin",
+    <section class="card">
+      <div class="card-header">
+        <h2>Provisioning URL</h2>
+        <p class="subhead">Paste the server URL into Yealink Auto Provisioning.</p>
+      </div>
+      <div class="provisioning-grid">
+        <div class="provisioning-block">
+          <span class="helper">Server URL</span>
+          <code class="mono">${escapeHtml(serverUrl)}</code>
+        </div>
+        <div class="provisioning-block">
+          <span class="helper">Phone pattern</span>
+          <code class="mono">${escapeHtml(provisionPattern)}</code>
+        </div>
+      </div>
+      <div class="steps">
+        <div class="step">1. Add your PBX server details.</div>
+        <div class="step">2. Add devices and SIP credentials.</div>
+        <div class="step">3. Point the phone to the server URL.</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <h2>Quick actions</h2>
+        <p class="subhead">Jump straight to the tasks you do most.</p>
+      </div>
+      <div class="quick-links">
+        <a class="link-card" href="/admin/pbx">
+          <strong>PBX servers</strong>
+          <span>Add or update PBX connections.</span>
+        </a>
+        <a class="link-card" href="/admin/devices">
+          <strong>Devices</strong>
+          <span>Pair MACs and push check-sync.</span>
+        </a>
+        <a class="link-card" href="/admin/firmware">
+          <strong>Firmware</strong>
+          <span>Sync firmware URLs and trigger updates.</span>
+        </a>
+      </div>
+    </section>
+  `;
+  return renderAdminShell({
+    request,
+    title: "Provisioning Overview",
+    activeNav: "overview",
+    header,
+    content,
+    message,
+  });
+}
+
+function renderPbxPage({
+  request,
+  pbxServers,
+  message,
+}: {
+  request: Request;
+  pbxServers: PbxServer[];
+  message: NoticeMessage | null;
+}): string {
+  const pbxRows = buildPbxRows(pbxServers);
+  const header = `
+    <div>
+      <p class="eyebrow">Provisioning</p>
+      <h1 class="page-title">PBX servers</h1>
+      <p class="subhead">Store connection details, upstream configs, and AMI credentials.</p>
+    </div>
+  `;
+  const content = `
+    <section class="card">
+      <div class="card-header">
+        <h2>Add PBX server</h2>
+        <p class="subhead">Define SIP and provisioning details for each PBX.</p>
+        <p class="helper">Use upstream settings if PBXware already hosts full Yealink configs (BLFs, keys, etc.).</p>
+        <p class="helper">AMI settings enable check-sync notifications (PJSIPNotify) for instant reprovisioning.</p>
+        <p class="helper">Use "Test AMI" after saving to verify credentials before triggering check-sync.</p>
+      </div>
+      <form method="post" action="/admin/pbx-servers" class="form-grid">
+        <label class="field">
+          <span>Name</span>
+          <input name="name" type="text" placeholder="PBXware DC1" required />
+        </label>
+        <label class="field">
+          <span>Host</span>
+          <input name="host" type="text" placeholder="pbx.dtbicom.xyz" required />
+        </label>
+        <label class="field">
+          <span>Port</span>
+          <input name="port" type="number" min="1" max="65535" value="5060" required />
+        </label>
+        <label class="field">
+          <span>Transport</span>
+          <select name="transport" required>
+            <option value="udp" selected>UDP</option>
+            <option value="tcp">TCP</option>
+            <option value="tls">TLS</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Proxy host</span>
+          <input name="outbound_proxy_host" type="text" placeholder="Optional" />
+        </label>
+        <label class="field">
+          <span>Proxy port</span>
+          <input name="outbound_proxy_port" type="number" min="1" max="65535" placeholder="Optional" />
+        </label>
+        <label class="field">
+          <span>Prov user</span>
+          <input name="prov_username" type="text" placeholder="Optional" />
+        </label>
+        <label class="field">
+          <span>Prov pass</span>
+          <input name="prov_password" type="password" placeholder="Optional" />
+        </label>
+        <label class="field">
+          <span>Upstream base URL</span>
+          <input name="upstream_base_url" type="url" placeholder="https://pbx.example.com/prov/yealink/" />
+        </label>
+        <label class="field">
+          <span>Upstream user</span>
+          <input name="upstream_username" type="text" placeholder="Optional" />
+        </label>
+        <label class="field">
+          <span>Upstream pass</span>
+          <input name="upstream_password" type="password" placeholder="Optional" />
+        </label>
+        <label class="field">
+          <span>Upstream MAC case</span>
+          <select name="upstream_mac_case">
+            <option value="lower" selected>lowercase</option>
+            <option value="upper">UPPERCASE</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>AMI host</span>
+          <input name="ami_host" type="text" placeholder="pbx.dtbicom.xyz" />
+        </label>
+        <label class="field">
+          <span>AMI port</span>
+          <input name="ami_port" type="number" min="1" max="65535" value="5038" />
+        </label>
+        <label class="field">
+          <span>AMI user</span>
+          <input name="ami_username" type="text" placeholder="Optional" />
+        </label>
+        <label class="field">
+          <span>AMI pass</span>
+          <input name="ami_password" type="password" placeholder="Optional" />
+        </label>
+        <label class="field">
+          <span>AMI TLS</span>
+          <select name="ami_tls">
+            <option value="0" selected>Disabled</option>
+            <option value="1">Enabled</option>
+          </select>
+        </label>
+        <div class="form-actions">
+          <button class="button" type="submit">Add server</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <h2>Existing servers</h2>
+        <p class="subhead">Edit, test AMI, or remove a PBX server.</p>
+      </div>
+      <div class="list">
+        ${pbxRows || "<p class=\"empty\">No PBX servers yet.</p>"}
+      </div>
+    </section>
+  `;
+  return renderAdminShell({
+    request,
+    title: "PBX servers",
+    activeNav: "pbx",
+    header,
+    content,
+    message,
+  });
+}
+
+function renderDevicesPage({
+  request,
+  pbxServers,
+  devices,
+  firmwareCatalog,
+  message,
+}: {
+  request: Request;
+  pbxServers: PbxServer[];
+  devices: DeviceWithPbx[];
+  firmwareCatalog: FirmwareCatalogEntry[];
+  message: NoticeMessage | null;
+}): string {
+  const host = request.get("host") ?? "localhost";
+  const baseUrl = `${request.protocol}://${host}`;
+  const pbxOptions = pbxServers
+    .map(
+      (server) =>
+        `<option value="${server.id}">${escapeHtml(
+          `${server.name} (${server.host})`
+        )}</option>`
+    )
+    .join("");
+  const firmwareOptionsAll = buildFirmwareOptions(
+    firmwareCatalog,
+    null,
+    null
+  );
+  const deviceRows = buildDeviceRows({
+    devices,
+    pbxServers,
+    firmwareCatalog,
+    baseUrl,
+  });
+  const header = `
+    <div>
+      <p class="eyebrow">Provisioning</p>
+      <h1 class="page-title">Devices</h1>
+      <p class="subhead">Pair MAC addresses with SIP credentials and a PBX.</p>
+    </div>
+  `;
+  const content = `
+    <section class="card">
+      <div class="card-header">
+        <h2>Add device</h2>
+        <p class="subhead">Firmware updates are one-shot and apply on the next provisioning request.</p>
+        <p class="helper">Check-sync notifications require AMI credentials on the PBX and a PJSIP endpoint.</p>
+      </div>
+      <form method="post" action="/admin/devices" class="form-grid">
+        <label class="field">
+          <span>Label</span>
+          <input name="label" type="text" placeholder="Front desk" />
+        </label>
+        <label class="field">
+          <span>MAC</span>
+          <input name="mac" type="text" placeholder="00:11:22:33:44:55" required />
+        </label>
+        <label class="field">
+          <span>Extension</span>
+          <input name="extension" type="text" placeholder="1001" required />
+        </label>
+        <label class="field">
+          <span>Auth user</span>
+          <input name="auth_user" type="text" placeholder="1001" required />
+        </label>
+        <label class="field">
+          <span>Auth pass</span>
+          <input name="auth_pass" type="password" placeholder="Secret" required />
+        </label>
+        <label class="field">
+          <span>Display name</span>
+          <input name="display_name" type="text" placeholder="Optional" />
+        </label>
+        <label class="field">
+          <span>Model</span>
+          <input name="model" type="text" placeholder="Yealink T43U" />
+        </label>
+        <label class="field">
+          <span>PJSIP endpoint</span>
+          <input name="pjsip_endpoint" type="text" placeholder="200100" />
+        </label>
+        <label class="field">
+          <span>Firmware</span>
+          <select name="firmware_id">
+            ${firmwareOptionsAll}
+          </select>
+        </label>
+        <label class="field">
+          <span>Firmware override URL</span>
+          <input name="firmware_url_override" type="url" placeholder="https://example.com/fw.rom" />
+        </label>
+        <label class="field">
+          <span>PBX server</span>
+          <select name="pbx_server_id" required>
+            ${pbxOptions || "<option value=\"\">Add a PBX first</option>"}
+          </select>
+        </label>
+        <label class="field">
+          <span>Line</span>
+          <input name="line_number" type="number" min="1" max="16" value="1" />
+        </label>
+        <div class="form-actions">
+          <button class="button" type="submit" ${pbxServers.length ? "" : "disabled"}>Add device</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <h2>Registered devices</h2>
+        <p class="subhead">Update credentials, trigger check-sync, or queue firmware updates.</p>
+      </div>
+      <div class="list">
+        ${deviceRows || "<p class=\"empty\">No devices yet.</p>"}
+      </div>
+    </section>
+  `;
+  return renderAdminShell({
+    request,
+    title: "Devices",
+    activeNav: "devices",
+    header,
+    content,
+    message,
+  });
+}
+
+function renderFirmwarePage({
+  request,
+  firmwareCatalog,
+  firmwareStats,
+  message,
+}: {
+  request: Request;
+  firmwareCatalog: FirmwareCatalogEntry[];
+  firmwareStats: { count: number; last_fetched_at: string | null };
+  message: NoticeMessage | null;
+}): string {
+  const firmwareCount = firmwareStats.count || 0;
+  const firmwareLastSync = firmwareStats.last_fetched_at
+    ? formatTimestamp(firmwareStats.last_fetched_at)
+    : "Never";
+  const preview = firmwareCatalog.slice(0, 20);
+  const firmwareRows = preview
+    .map(
+      (entry) => `
+        <div class="table-row">
+          <span>${escapeHtml(entry.vendor)}</span>
+          <span>${escapeHtml(entry.model)}</span>
+          <span>${escapeHtml(entry.version)}</span>
+          <span class="mono table-url">${escapeHtml(entry.url)}</span>
+        </div>
+      `
+    )
+    .join("");
+  const header = `
+    <div>
+      <p class="eyebrow">Provisioning</p>
+      <h1 class="page-title">Firmware</h1>
+      <p class="subhead">Sync and manage firmware URLs for one-shot updates.</p>
+    </div>
+  `;
+  const content = `
+    <section class="card">
+      <div class="card-header">
+        <h2>Firmware catalog</h2>
+        <p class="subhead">Sync firmware URLs from 3CX (V20 + V18).</p>
+        <p class="helper">Entries: ${escapeHtml(
+          firmwareCount
+        )} &bull; Last sync: ${escapeHtml(firmwareLastSync)}</p>
+      </div>
+      <form method="post" action="/admin/firmware/sync" class="form-grid form-grid--tight">
+        <button class="button" type="submit">Sync from 3CX</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <h2>Latest entries</h2>
+        <p class="subhead">Showing ${preview.length} of ${escapeHtml(
+          firmwareCount
+        )} firmware entries.</p>
+      </div>
+      <div class="table">
+        <div class="table-head">
+          <span>Vendor</span>
+          <span>Model</span>
+          <span>Version</span>
+          <span>URL</span>
+        </div>
+        ${firmwareRows || "<p class=\"empty\">No firmware entries yet.</p>"}
+      </div>
+    </section>
+  `;
+  return renderAdminShell({
+    request,
+    title: "Firmware",
+    activeNav: "firmware",
+    header,
     content,
     message,
   });
@@ -1472,23 +1740,77 @@ app.get("/", (_request, response) => {
 
 app.get("/admin", (request, response) => {
   const session = getSession(request);
-  const errorParam =
-    typeof request.query.error === "string" ? request.query.error : null;
-  const noticeParam =
-    typeof request.query.notice === "string" ? request.query.notice : null;
-  const message: NoticeMessage | null = errorParam
-    ? { type: "error", text: errorParam }
-    : noticeParam
-      ? { type: "success", text: noticeParam }
-      : null;
+  const message = getNoticeMessage(request);
 
   if (!session) {
     response.send(renderLoginPage({ message }));
     return;
   }
+  if (message) {
+    response.redirect(
+      buildNoticeUrl(
+        "/admin/overview",
+        message.type === "error" ? "error" : "notice",
+        message.text
+      )
+    );
+    return;
+  }
+  response.redirect("/admin/overview");
+});
 
+app.get("/admin/overview", requireAuth, (request, response) => {
+  const message = getNoticeMessage(request);
   const pbxServers = statements.listPbx.all() as PbxServer[];
   const devices = statements.listDevices.all() as DeviceWithPbx[];
+  const firmwareStatsRow = statements.getFirmwareStats.get() as
+    | { count: number; last_fetched_at: string | null }
+    | undefined;
+  const firmwareStats = {
+    count: firmwareStatsRow?.count ?? 0,
+    last_fetched_at: firmwareStatsRow?.last_fetched_at ?? null,
+  };
+  response.send(
+    renderOverviewPage({
+      request,
+      pbxServers,
+      devices,
+      firmwareStats,
+      message,
+    })
+  );
+});
+
+app.get("/admin/pbx", requireAuth, (request, response) => {
+  const message = getNoticeMessage(request);
+  const pbxServers = statements.listPbx.all() as PbxServer[];
+  response.send(
+    renderPbxPage({
+      request,
+      pbxServers,
+      message,
+    })
+  );
+});
+
+app.get("/admin/devices", requireAuth, (request, response) => {
+  const message = getNoticeMessage(request);
+  const pbxServers = statements.listPbx.all() as PbxServer[];
+  const devices = statements.listDevices.all() as DeviceWithPbx[];
+  const firmwareCatalog = statements.listFirmware.all() as FirmwareCatalogEntry[];
+  response.send(
+    renderDevicesPage({
+      request,
+      pbxServers,
+      devices,
+      firmwareCatalog,
+      message,
+    })
+  );
+});
+
+app.get("/admin/firmware", requireAuth, (request, response) => {
+  const message = getNoticeMessage(request);
   const firmwareCatalog = statements.listFirmware.all() as FirmwareCatalogEntry[];
   const firmwareStatsRow = statements.getFirmwareStats.get() as
     | { count: number; last_fetched_at: string | null }
@@ -1498,10 +1820,8 @@ app.get("/admin", (request, response) => {
     last_fetched_at: firmwareStatsRow?.last_fetched_at ?? null,
   };
   response.send(
-    renderAdminPage({
+    renderFirmwarePage({
       request,
-      pbxServers,
-      devices,
       firmwareCatalog,
       firmwareStats,
       message,
@@ -1525,7 +1845,7 @@ app.post("/admin/login", (request, response) => {
     secure: COOKIE_SECURE,
     expires: session.expiresAt,
   });
-  response.redirect(buildNoticeUrl("/admin", "notice", "Welcome back."));
+  response.redirect(buildNoticeUrl("/admin/overview", "notice", "Welcome back."));
 });
 
 app.post("/admin/logout", requireAuth, (request, response) => {
@@ -1566,14 +1886,14 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
-      buildNoticeUrl("/admin", "error", "Invalid PBX server data.")
+      buildNoticeUrl("/admin/pbx", "error", "Invalid PBX server data.")
     );
     return;
   }
   if ((provUser && !provPass) || (!provUser && provPass)) {
     response.redirect(
       buildNoticeUrl(
-        "/admin",
+        "/admin/pbx",
         "error",
         "Provisioning username and password must both be set."
       )
@@ -1582,14 +1902,14 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
   }
   if (upstreamBaseInput && !upstreamBaseUrl) {
     response.redirect(
-      buildNoticeUrl("/admin", "error", "Upstream URL is invalid.")
+      buildNoticeUrl("/admin/pbx", "error", "Upstream URL is invalid.")
     );
     return;
   }
   if ((upstreamUser && !upstreamPass) || (!upstreamUser && upstreamPass)) {
     response.redirect(
       buildNoticeUrl(
-        "/admin",
+        "/admin/pbx",
         "error",
         "Upstream username and password must both be set."
       )
@@ -1598,14 +1918,14 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
   }
   if (amiHostInput && (amiPortInput < 1 || amiPortInput > 65535)) {
     response.redirect(
-      buildNoticeUrl("/admin", "error", "AMI port is invalid.")
+      buildNoticeUrl("/admin/pbx", "error", "AMI port is invalid.")
     );
     return;
   }
   if ((amiHostInput || amiUser || amiPass) && (!amiHostInput || !amiUser || !amiPass)) {
     response.redirect(
       buildNoticeUrl(
-        "/admin",
+        "/admin/pbx",
         "error",
         "AMI host, username, and password must all be set."
       )
@@ -1641,14 +1961,14 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
     now
   );
 
-  response.redirect(buildNoticeUrl("/admin", "notice", "PBX added."));
+  response.redirect(buildNoticeUrl("/admin/pbx", "notice", "PBX added."));
 });
 
 app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
   const id = Number.parseInt(request.params.id, 10);
   const existing = statements.getPbx.get(id) as PbxServer | undefined;
   if (!existing) {
-    response.redirect(buildNoticeUrl("/admin", "error", "PBX not found."));
+    response.redirect(buildNoticeUrl("/admin/pbx", "error", "PBX not found."));
     return;
   }
 
@@ -1679,14 +1999,14 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
-      buildNoticeUrl("/admin", "error", "Invalid PBX server data.")
+      buildNoticeUrl("/admin/pbx", "error", "Invalid PBX server data.")
     );
     return;
   }
   if ((provUser && !provPass) || (!provUser && provPass)) {
     response.redirect(
       buildNoticeUrl(
-        "/admin",
+        "/admin/pbx",
         "error",
         "Provisioning username and password must both be set."
       )
@@ -1695,14 +2015,14 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
   }
   if (upstreamBaseInput && !upstreamBaseUrl) {
     response.redirect(
-      buildNoticeUrl("/admin", "error", "Upstream URL is invalid.")
+      buildNoticeUrl("/admin/pbx", "error", "Upstream URL is invalid.")
     );
     return;
   }
   if ((upstreamUser && !upstreamPass) || (!upstreamUser && upstreamPass)) {
     response.redirect(
       buildNoticeUrl(
-        "/admin",
+        "/admin/pbx",
         "error",
         "Upstream username and password must both be set."
       )
@@ -1711,14 +2031,14 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
   }
   if (amiHostInput && (amiPortInput < 1 || amiPortInput > 65535)) {
     response.redirect(
-      buildNoticeUrl("/admin", "error", "AMI port is invalid.")
+      buildNoticeUrl("/admin/pbx", "error", "AMI port is invalid.")
     );
     return;
   }
   if ((amiHostInput || amiUser || amiPass) && (!amiHostInput || !amiUser || !amiPass)) {
     response.redirect(
       buildNoticeUrl(
-        "/admin",
+        "/admin/pbx",
         "error",
         "AMI host, username, and password must all be set."
       )
@@ -1754,7 +2074,7 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
     id
   );
 
-  response.redirect(buildNoticeUrl("/admin", "notice", "PBX updated."));
+  response.redirect(buildNoticeUrl("/admin/pbx", "notice", "PBX updated."));
 });
 
 app.post(
@@ -1764,13 +2084,13 @@ app.post(
     const id = Number.parseInt(request.params.id, 10);
     const pbx = statements.getPbx.get(id) as PbxServer | undefined;
     if (!pbx) {
-      response.redirect(buildNoticeUrl("/admin", "error", "PBX not found."));
+      response.redirect(buildNoticeUrl("/admin/pbx", "error", "PBX not found."));
       return;
     }
     if (!pbx.ami_host || !pbx.ami_username || !pbx.ami_password) {
       response.redirect(
         buildNoticeUrl(
-          "/admin",
+          "/admin/pbx",
           "error",
           "PBX AMI settings are incomplete."
         )
@@ -1796,14 +2116,14 @@ app.post(
       }
       await client.sendAction({ Action: "Logoff" }).catch(() => undefined);
       response.redirect(
-        buildNoticeUrl("/admin", "notice", "AMI connection successful.")
+        buildNoticeUrl("/admin/pbx", "notice", "AMI connection successful.")
       );
     } catch (error) {
       const message =
         error instanceof Error && error.message
           ? error.message
           : "AMI connection failed.";
-      response.redirect(buildNoticeUrl("/admin", "error", message));
+      response.redirect(buildNoticeUrl("/admin/pbx", "error", message));
     } finally {
       if (client) {
         client.close();
@@ -1818,7 +2138,7 @@ app.post(
   (request, response) => {
     const id = Number.parseInt(request.params.id, 10);
     statements.deletePbx.run(id);
-    response.redirect(buildNoticeUrl("/admin", "notice", "PBX removed."));
+    response.redirect(buildNoticeUrl("/admin/pbx", "notice", "PBX removed."));
   }
 );
 
@@ -1837,7 +2157,7 @@ app.post("/admin/firmware/sync", requireAuth, async (_request, response) => {
         : v18Response.status;
       response.redirect(
         buildNoticeUrl(
-          "/admin",
+          "/admin/firmware",
           "error",
           `Firmware sync failed (${status}).`
         )
@@ -1854,7 +2174,7 @@ app.post("/admin/firmware/sync", requireAuth, async (_request, response) => {
     ];
     if (!parsed.length) {
       response.redirect(
-        buildNoticeUrl("/admin", "error", "No firmware entries found.")
+        buildNoticeUrl("/admin/firmware", "error", "No firmware entries found.")
       );
       return;
     }
@@ -1884,14 +2204,14 @@ app.post("/admin/firmware/sync", requireAuth, async (_request, response) => {
     insertEntries(entries);
     response.redirect(
       buildNoticeUrl(
-        "/admin",
+        "/admin/firmware",
         "notice",
         `Firmware sync complete (${entries.length} entries).`
       )
     );
   } catch (error) {
     response.redirect(
-      buildNoticeUrl("/admin", "error", "Firmware sync failed.")
+      buildNoticeUrl("/admin/firmware", "error", "Firmware sync failed.")
     );
   }
 });
@@ -1922,7 +2242,7 @@ app.post("/admin/devices", requireAuth, (request, response) => {
     lineNumber > 16
   ) {
     response.redirect(
-      buildNoticeUrl("/admin", "error", "Invalid device data.")
+      buildNoticeUrl("/admin/devices", "error", "Invalid device data.")
     );
     return;
   }
@@ -1932,7 +2252,11 @@ app.post("/admin/devices", requireAuth, (request, response) => {
     : null;
   if (firmwareUrlOverrideInput && !firmwareUrlOverride) {
     response.redirect(
-      buildNoticeUrl("/admin", "error", "Firmware override URL is invalid.")
+      buildNoticeUrl(
+        "/admin/devices",
+        "error",
+        "Firmware override URL is invalid."
+      )
     );
     return;
   }
@@ -1950,7 +2274,7 @@ app.post("/admin/devices", requireAuth, (request, response) => {
   const pbx = statements.getPbx.get(pbxServerId) as PbxServer | undefined;
   if (!pbx) {
     response.redirect(
-      buildNoticeUrl("/admin", "error", "PBX server not found.")
+      buildNoticeUrl("/admin/devices", "error", "PBX server not found.")
     );
     return;
   }
@@ -1978,19 +2302,23 @@ app.post("/admin/devices", requireAuth, (request, response) => {
     );
   } catch (error) {
     response.redirect(
-      buildNoticeUrl("/admin", "error", "Device MAC already exists.")
+      buildNoticeUrl("/admin/devices", "error", "Device MAC already exists.")
     );
     return;
   }
 
-  response.redirect(buildNoticeUrl("/admin", "notice", "Device added."));
+  response.redirect(
+    buildNoticeUrl("/admin/devices", "notice", "Device added.")
+  );
 });
 
 app.post("/admin/devices/:id", requireAuth, (request, response) => {
   const id = Number.parseInt(request.params.id, 10);
   const existing = statements.getDevice.get(id) as DeviceWithPbx | undefined;
   if (!existing) {
-    response.redirect(buildNoticeUrl("/admin", "error", "Device not found."));
+    response.redirect(
+      buildNoticeUrl("/admin/devices", "error", "Device not found.")
+    );
     return;
   }
 
@@ -2019,7 +2347,7 @@ app.post("/admin/devices/:id", requireAuth, (request, response) => {
     lineNumber > 16
   ) {
     response.redirect(
-      buildNoticeUrl("/admin", "error", "Invalid device data.")
+      buildNoticeUrl("/admin/devices", "error", "Invalid device data.")
     );
     return;
   }
@@ -2029,7 +2357,11 @@ app.post("/admin/devices/:id", requireAuth, (request, response) => {
     : null;
   if (firmwareUrlOverrideInput && !firmwareUrlOverride) {
     response.redirect(
-      buildNoticeUrl("/admin", "error", "Firmware override URL is invalid.")
+      buildNoticeUrl(
+        "/admin/devices",
+        "error",
+        "Firmware override URL is invalid."
+      )
     );
     return;
   }
@@ -2047,7 +2379,7 @@ app.post("/admin/devices/:id", requireAuth, (request, response) => {
   const pbx = statements.getPbx.get(pbxServerId) as PbxServer | undefined;
   if (!pbx) {
     response.redirect(
-      buildNoticeUrl("/admin", "error", "PBX server not found.")
+      buildNoticeUrl("/admin/devices", "error", "PBX server not found.")
     );
     return;
   }
@@ -2072,12 +2404,14 @@ app.post("/admin/devices/:id", requireAuth, (request, response) => {
     );
   } catch (error) {
     response.redirect(
-      buildNoticeUrl("/admin", "error", "Device MAC already exists.")
+      buildNoticeUrl("/admin/devices", "error", "Device MAC already exists.")
     );
     return;
   }
 
-  response.redirect(buildNoticeUrl("/admin", "notice", "Device updated."));
+  response.redirect(
+    buildNoticeUrl("/admin/devices", "notice", "Device updated.")
+  );
 });
 
 app.post(
@@ -2087,14 +2421,16 @@ app.post(
     const id = Number.parseInt(request.params.id, 10);
     const device = statements.getDevice.get(id) as DeviceWithPbx | undefined;
     if (!device) {
-      response.redirect(buildNoticeUrl("/admin", "error", "Device not found."));
+      response.redirect(
+        buildNoticeUrl("/admin/devices", "error", "Device not found.")
+      );
       return;
     }
     const firmwareUrl = resolveDeviceFirmwareUrl(device);
     if (!firmwareUrl) {
       response.redirect(
         buildNoticeUrl(
-          "/admin",
+          "/admin/devices",
           "error",
           "Select firmware or set an override URL first."
         )
@@ -2105,7 +2441,7 @@ app.post(
     statements.triggerFirmware.run(now, now, id);
     response.redirect(
       buildNoticeUrl(
-        "/admin",
+        "/admin/devices",
         "notice",
         "Firmware update queued for next provision."
       )
@@ -2120,7 +2456,9 @@ app.post(
     const id = Number.parseInt(request.params.id, 10);
     const device = statements.getDevice.get(id) as DeviceWithPbx | undefined;
     if (!device) {
-      response.redirect(buildNoticeUrl("/admin", "error", "Device not found."));
+      response.redirect(
+        buildNoticeUrl("/admin/devices", "error", "Device not found.")
+      );
       return;
     }
     const endpoint = String(
@@ -2129,7 +2467,7 @@ app.post(
     if (!endpoint) {
       response.redirect(
         buildNoticeUrl(
-          "/admin",
+          "/admin/devices",
           "error",
           "PJSIP endpoint is required to send check-sync."
         )
@@ -2139,7 +2477,7 @@ app.post(
     if (!device.pbx_ami_host || !device.pbx_ami_username || !device.pbx_ami_password) {
       response.redirect(
         buildNoticeUrl(
-          "/admin",
+          "/admin/devices",
           "error",
           "PBX AMI settings are incomplete."
         )
@@ -2173,14 +2511,14 @@ app.post(
       }
       await client.sendAction({ Action: "Logoff" }).catch(() => undefined);
       response.redirect(
-        buildNoticeUrl("/admin", "notice", "Check-sync sent via AMI.")
+        buildNoticeUrl("/admin/devices", "notice", "Check-sync sent via AMI.")
       );
     } catch (error) {
       const message =
         error instanceof Error && error.message
           ? error.message
           : "AMI notify failed.";
-      response.redirect(buildNoticeUrl("/admin", "error", message));
+      response.redirect(buildNoticeUrl("/admin/devices", "error", message));
     } finally {
       if (client) {
         client.close();
@@ -2195,7 +2533,9 @@ app.post(
   (request, response) => {
     const id = Number.parseInt(request.params.id, 10);
     statements.deleteDevice.run(id);
-    response.redirect(buildNoticeUrl("/admin", "notice", "Device removed."));
+    response.redirect(
+      buildNoticeUrl("/admin/devices", "notice", "Device removed.")
+    );
   }
 );
 
