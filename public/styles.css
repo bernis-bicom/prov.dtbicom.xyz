@@ -103,6 +103,7 @@ body::after {
   position: sticky;
   top: 24px;
   align-self: start;
+  overflow-x: hidden;
 }
 
 .sidebar-brand {
@@ -122,6 +123,7 @@ body::after {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  overflow-x: hidden;
 }
 
 .nav-link {
