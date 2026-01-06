@@ -76,6 +76,8 @@ db.exec(`
     ami_username TEXT,
     ami_password TEXT,
     ami_tls INTEGER NOT NULL DEFAULT 0,
+    ami_notify_type TEXT,
+    ami_reboot_type TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -160,6 +162,8 @@ ensureColumns("pbx_servers", [
   { name: "ami_username", type: "TEXT" },
   { name: "ami_password", type: "TEXT" },
   { name: "ami_tls", type: "INTEGER" },
+  { name: "ami_notify_type", type: "TEXT" },
+  { name: "ami_reboot_type", type: "TEXT" },
 ]);
 
 ensureColumns("devices", [
@@ -232,6 +236,8 @@ type PbxServer = {
   ami_username: string | null;
   ami_password: string | null;
   ami_tls: number | null;
+  ami_notify_type: string | null;
+  ami_reboot_type: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -275,6 +281,8 @@ type DeviceWithPbx = Device & {
   pbx_ami_username: string | null;
   pbx_ami_password: string | null;
   pbx_ami_tls: number | null;
+  pbx_ami_notify_type: string | null;
+  pbx_ami_reboot_type: string | null;
   firmware_vendor: string | null;
   firmware_model: string | null;
   firmware_version: string | null;
@@ -333,13 +341,13 @@ const statements = {
   getPbx: db.prepare("SELECT * FROM pbx_servers WHERE id = ?"),
   insertPbx: db.prepare(`
     INSERT INTO pbx_servers
-      (name, host, port, transport, outbound_proxy_host, outbound_proxy_port, prov_username, prov_password, upstream_base_url, upstream_username, upstream_password, upstream_mac_case, ami_host, ami_port, ami_username, ami_password, ami_tls, created_at, updated_at)
+      (name, host, port, transport, outbound_proxy_host, outbound_proxy_port, prov_username, prov_password, upstream_base_url, upstream_username, upstream_password, upstream_mac_case, ami_host, ami_port, ami_username, ami_password, ami_tls, ami_notify_type, ami_reboot_type, created_at, updated_at)
     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   updatePbx: db.prepare(`
     UPDATE pbx_servers
-    SET name = ?, host = ?, port = ?, transport = ?, outbound_proxy_host = ?, outbound_proxy_port = ?, prov_username = ?, prov_password = ?, upstream_base_url = ?, upstream_username = ?, upstream_password = ?, upstream_mac_case = ?, ami_host = ?, ami_port = ?, ami_username = ?, ami_password = ?, ami_tls = ?, updated_at = ?
+    SET name = ?, host = ?, port = ?, transport = ?, outbound_proxy_host = ?, outbound_proxy_port = ?, prov_username = ?, prov_password = ?, upstream_base_url = ?, upstream_username = ?, upstream_password = ?, upstream_mac_case = ?, ami_host = ?, ami_port = ?, ami_username = ?, ami_password = ?, ami_tls = ?, ami_notify_type = ?, ami_reboot_type = ?, updated_at = ?
     WHERE id = ?
   `),
   deletePbx: db.prepare("DELETE FROM pbx_servers WHERE id = ?"),
@@ -359,6 +367,8 @@ const statements = {
            pbx_servers.ami_username AS pbx_ami_username,
            pbx_servers.ami_password AS pbx_ami_password,
            pbx_servers.ami_tls AS pbx_ami_tls,
+           pbx_servers.ami_notify_type AS pbx_ami_notify_type,
+           pbx_servers.ami_reboot_type AS pbx_ami_reboot_type,
            firmware_catalog.vendor AS firmware_vendor,
            firmware_catalog.model AS firmware_model,
            firmware_catalog.version AS firmware_version,
@@ -384,6 +394,8 @@ const statements = {
            pbx_servers.ami_username AS pbx_ami_username,
            pbx_servers.ami_password AS pbx_ami_password,
            pbx_servers.ami_tls AS pbx_ami_tls,
+           pbx_servers.ami_notify_type AS pbx_ami_notify_type,
+           pbx_servers.ami_reboot_type AS pbx_ami_reboot_type,
            firmware_catalog.vendor AS firmware_vendor,
            firmware_catalog.model AS firmware_model,
            firmware_catalog.version AS firmware_version,
@@ -409,6 +421,8 @@ const statements = {
            pbx_servers.ami_username AS pbx_ami_username,
            pbx_servers.ami_password AS pbx_ami_password,
            pbx_servers.ami_tls AS pbx_ami_tls,
+           pbx_servers.ami_notify_type AS pbx_ami_notify_type,
+           pbx_servers.ami_reboot_type AS pbx_ami_reboot_type,
            firmware_catalog.vendor AS firmware_vendor,
            firmware_catalog.model AS firmware_model,
            firmware_catalog.version AS firmware_version,
@@ -1202,6 +1216,18 @@ function buildPbxRows(pbxServers: PbxServer[]): string {
               }>Enabled</option>
             </select>
           </label>
+          <label class="field">
+            <span>AMI notify type</span>
+            <input name="ami_notify_type" type="text" value="${escapeHtml(
+              server.ami_notify_type || "yealink-notify"
+            )}" placeholder="yealink-notify" />
+          </label>
+          <label class="field">
+            <span>AMI reboot type</span>
+            <input name="ami_reboot_type" type="text" value="${escapeHtml(
+              server.ami_reboot_type || "yealink-reboot"
+            )}" placeholder="yealink-reboot" />
+          </label>
           <div class="form-actions">
             <button class="button" type="submit">Save</button>
           </div>
@@ -1355,6 +1381,11 @@ function buildDeviceRows({
             notifyReady ? "" : " disabled"
           }>Trigger check-sync</button>
         </form>
+        <form method="post" action="/admin/devices/${device.id}/reboot" class="inline-form">
+          <button class="button button--ghost" type="submit"${
+            notifyReady ? "" : " disabled"
+          }>Trigger reboot</button>
+        </form>
         <form method="post" action="/admin/devices/${device.id}/delete" class="inline-form">
           <button class="button button--ghost" type="submit">Delete</button>
         </form>
@@ -1492,7 +1523,8 @@ function renderPbxPage({
         <p class="subhead">Define SIP and provisioning details for each PBX.</p>
         <p class="helper">Use upstream settings if PBXware already hosts full Yealink configs (BLFs, keys, etc.).</p>
         <p class="helper">AMI settings enable check-sync notifications (PJSIPNotify) for instant reprovisioning.</p>
-        <p class="helper">Use "Test AMI" after saving to verify credentials before triggering check-sync.</p>
+        <p class="helper">Use "Test AMI" after saving to verify credentials before triggering check-sync or reboot.</p>
+        <p class="helper">PBXware defaults: notify type "yealink-notify" and reboot type "yealink-reboot".</p>
       </div>
       <form method="post" action="/admin/pbx-servers" class="form-grid">
         <label class="field">
@@ -1573,6 +1605,14 @@ function renderPbxPage({
             <option value="1">Enabled</option>
           </select>
         </label>
+        <label class="field">
+          <span>AMI notify type</span>
+          <input name="ami_notify_type" type="text" value="yealink-notify" />
+        </label>
+        <label class="field">
+          <span>AMI reboot type</span>
+          <input name="ami_reboot_type" type="text" value="yealink-reboot" />
+        </label>
         <div class="form-actions">
           <button class="button" type="submit">Add server</button>
         </div>
@@ -1645,7 +1685,7 @@ function renderDevicesPage({
       <div class="card-header">
         <h2>Add device</h2>
         <p class="subhead">Firmware updates are one-shot and apply on the next provisioning request.</p>
-        <p class="helper">Check-sync notifications require AMI credentials on the PBX and a PJSIP endpoint.</p>
+        <p class="helper">Check-sync and reboot notifications require AMI credentials on the PBX and a PJSIP endpoint.</p>
       </div>
       <form method="post" action="/admin/devices" class="form-grid">
         <label class="field">
@@ -1965,7 +2005,7 @@ function renderAboutPage({
         </div>
         <div class="about-card">
           <h3>AMI check-sync</h3>
-          <p>When AMI credentials are set, you can trigger <code>PJSIPNotify</code> to make phones pull new configs instantly.</p>
+          <p>When AMI credentials are set, you can trigger <code>PJSIPNotify</code> to make phones pull new configs or reboot on demand.</p>
         </div>
         <div class="about-card">
           <h3>Firmware updates</h3>
@@ -2207,6 +2247,12 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
   const amiUser = String(request.body.ami_username || "").trim();
   const amiPass = String(request.body.ami_password || "");
   const amiTls = String(request.body.ami_tls || "0") === "1" ? 1 : 0;
+  const amiNotifyTypeInput = String(
+    request.body.ami_notify_type || ""
+  ).trim();
+  const amiRebootTypeInput = String(
+    request.body.ami_reboot_type || ""
+  ).trim();
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
@@ -2261,6 +2307,8 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
   const amiUsername = amiHost ? amiUser : null;
   const amiPassword = amiHost ? amiPass : null;
   const amiTlsValue = amiHost ? amiTls : 0;
+  const amiNotifyType = amiNotifyTypeInput || null;
+  const amiRebootType = amiRebootTypeInput || null;
 
   const now = new Date().toISOString();
   statements.insertPbx.run(
@@ -2281,6 +2329,8 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
     amiUsername,
     amiPassword,
     amiTlsValue,
+    amiNotifyType,
+    amiRebootType,
     now,
     now
   );
@@ -2320,6 +2370,12 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
   const amiUser = String(request.body.ami_username || "").trim();
   const amiPass = String(request.body.ami_password || "");
   const amiTls = String(request.body.ami_tls || "0") === "1" ? 1 : 0;
+  const amiNotifyTypeInput = String(
+    request.body.ami_notify_type || ""
+  ).trim();
+  const amiRebootTypeInput = String(
+    request.body.ami_reboot_type || ""
+  ).trim();
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
@@ -2374,6 +2430,8 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
   const amiUsername = amiHost ? amiUser : null;
   const amiPassword = amiHost ? amiPass : null;
   const amiTlsValue = amiHost ? amiTls : 0;
+  const amiNotifyType = amiNotifyTypeInput || null;
+  const amiRebootType = amiRebootTypeInput || null;
 
   const now = new Date().toISOString();
   statements.updatePbx.run(
@@ -2394,6 +2452,8 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
     amiUsername,
     amiPassword,
     amiTlsValue,
+    amiNotifyType,
+    amiRebootType,
     now,
     id
   );
@@ -2808,6 +2868,9 @@ app.post(
       );
       return;
     }
+    const notifyType =
+      (device.pbx_ami_notify_type || "yealink-notify").trim() ||
+      "yealink-notify";
 
     let client: Awaited<ReturnType<typeof createAmiClient>> | null = null;
     try {
@@ -2828,7 +2891,7 @@ app.post(
       const notify = await client.sendAction({
         Action: "PJSIPNotify",
         Endpoint: endpoint,
-        Option: "check-sync",
+        Option: notifyType,
       });
       if (notify.Response !== "Success") {
         throw new Error(notify.Message || "AMI notify failed.");
@@ -2836,6 +2899,87 @@ app.post(
       await client.sendAction({ Action: "Logoff" }).catch(() => undefined);
       response.redirect(
         buildNoticeUrl("/admin/devices", "notice", "Check-sync sent via AMI.")
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "AMI notify failed.";
+      response.redirect(buildNoticeUrl("/admin/devices", "error", message));
+    } finally {
+      if (client) {
+        client.close();
+      }
+    }
+  }
+);
+
+app.post(
+  "/admin/devices/:id/reboot",
+  requireAuth,
+  async (request, response) => {
+    const id = Number.parseInt(request.params.id, 10);
+    const device = statements.getDevice.get(id) as DeviceWithPbx | undefined;
+    if (!device) {
+      response.redirect(
+        buildNoticeUrl("/admin/devices", "error", "Device not found.")
+      );
+      return;
+    }
+    const endpoint = String(
+      device.pjsip_endpoint || device.auth_user || ""
+    ).trim();
+    if (!endpoint) {
+      response.redirect(
+        buildNoticeUrl(
+          "/admin/devices",
+          "error",
+          "PJSIP endpoint is required to send reboot."
+        )
+      );
+      return;
+    }
+    if (!device.pbx_ami_host || !device.pbx_ami_username || !device.pbx_ami_password) {
+      response.redirect(
+        buildNoticeUrl(
+          "/admin/devices",
+          "error",
+          "PBX AMI settings are incomplete."
+        )
+      );
+      return;
+    }
+    const rebootType =
+      (device.pbx_ami_reboot_type || "yealink-reboot").trim() ||
+      "yealink-reboot";
+
+    let client: Awaited<ReturnType<typeof createAmiClient>> | null = null;
+    try {
+      client = await createAmiClient({
+        host: device.pbx_ami_host,
+        port: device.pbx_ami_port || 5038,
+        useTls: device.pbx_ami_tls === 1,
+      });
+      const login = await client.sendAction({
+        Action: "Login",
+        Username: device.pbx_ami_username,
+        Secret: device.pbx_ami_password,
+        Events: "off",
+      });
+      if (login.Response !== "Success") {
+        throw new Error(login.Message || "AMI login failed.");
+      }
+      const notify = await client.sendAction({
+        Action: "PJSIPNotify",
+        Endpoint: endpoint,
+        Option: rebootType,
+      });
+      if (notify.Response !== "Success") {
+        throw new Error(notify.Message || "AMI notify failed.");
+      }
+      await client.sendAction({ Action: "Logoff" }).catch(() => undefined);
+      response.redirect(
+        buildNoticeUrl("/admin/devices", "notice", "Reboot sent via AMI.")
       );
     } catch (error) {
       const message =
