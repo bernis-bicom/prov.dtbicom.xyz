@@ -960,7 +960,7 @@ function renderLoginPage({
   `;
 
   return renderLayout({
-    title: "Provisioning Admin",
+    title: "AutoProv Switchboard",
     bodyClass: "login",
     content,
     message,
@@ -1052,7 +1052,7 @@ function renderAdminShell({
           <div class="logo">P</div>
           <div>
             <p class="eyebrow">Provisioning</p>
-            <p class="brand-title">Auto Provisioning</p>
+            <p class="brand-title">AutoProv Switchboard</p>
           </div>
         </div>
         <nav class="nav">
@@ -1939,7 +1939,7 @@ function renderAboutPage({
     <div>
       <p class="eyebrow">Provisioning</p>
       <h1 class="page-title">About</h1>
-      <p class="subhead">How the Yealink Auto Provisioning Switchboard works.</p>
+      <p class="subhead">How the AutoProv Switchboard works.</p>
     </div>
   `;
   const content = `
@@ -2828,7 +2828,7 @@ app.post(
       const notify = await client.sendAction({
         Action: "PJSIPNotify",
         Endpoint: endpoint,
-        Event: "check-sync",
+        Option: "check-sync",
       });
       if (notify.Response !== "Success") {
         throw new Error(notify.Message || "AMI notify failed.");
