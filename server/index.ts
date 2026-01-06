@@ -1014,6 +1014,27 @@ function formatTimestamp(value: string | null): string {
   return value.replace("T", " ").replace("Z", "");
 }
 
+function formatParisTimestamp(value: string | null): string {
+  if (!value) return "Never";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Paris",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const lookup = Object.fromEntries(
+    parts
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value])
+  );
+  return `${lookup.year}-${lookup.month}-${lookup.day} ${lookup.hour}:${lookup.minute}:${lookup.second}`;
+}
 type AdminNavKey = "overview" | "pbx" | "devices" | "firmware" | "logs" | "about";
 
 function getNoticeMessage(request: Request): NoticeMessage | null {
@@ -1895,7 +1916,7 @@ function renderLogsPage({
               : "tag tag--error";
       return `
         <div class="table-row">
-          <span>${escapeHtml(formatTimestamp(entry.created_at))}</span>
+          <span>${escapeHtml(formatParisTimestamp(entry.created_at))}</span>
           <span class="mono">${escapeHtml(formattedMac)}</span>
           <span class="${statusClass}">${escapeHtml(entry.status)}</span>
           <span>${escapeHtml(entry.pbx || "—")}</span>

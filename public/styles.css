@@ -307,11 +307,26 @@ body::after {
 
 .table--logs .table-head,
 .table--logs .table-row {
-  grid-template-columns: 1.2fr 1fr 0.9fr 1fr 1fr 1.2fr 2fr;
+  grid-template-columns:
+    minmax(150px, 180px)
+    minmax(120px, 150px)
+    minmax(110px, 130px)
+    minmax(140px, 180px)
+    minmax(130px, 160px)
+    minmax(180px, 240px)
+    minmax(240px, 1fr);
 }
 
 .table-url {
   word-break: break-all;
+}
+
+.table--logs .table-row > span {
+  min-width: 0;
+}
+
+.table--logs .table-row > span:nth-child(-n + 5) {
+  white-space: nowrap;
 }
 
 .about-grid {
