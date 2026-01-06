@@ -1955,24 +1955,26 @@ function renderLogsPage({
           <button class="button button--ghost" type="submit">Apply filter</button>
         </div>
       </form>
-      <div class="table table--logs">
-        <div class="table-head">
-          <span>Time</span>
-          <span>MAC</span>
-          <span>Status</span>
-          <span>PBX</span>
-          <span>IP</span>
-          <span>Reason</span>
-          <span>User Agent</span>
+      <div class="table-scroll">
+        <div class="table table--logs">
+          <div class="table-head">
+            <span>Time</span>
+            <span>MAC</span>
+            <span>Status</span>
+            <span>PBX</span>
+            <span>IP</span>
+            <span>Reason</span>
+            <span>User Agent</span>
+          </div>
+          ${
+            rows ||
+            `<p class="empty">${
+              filterInput
+                ? "No log entries match that filter."
+                : "No provisioning logs yet."
+            }</p>`
+          }
         </div>
-        ${
-          rows ||
-          `<p class="empty">${
-            filterInput
-              ? "No log entries match that filter."
-              : "No provisioning logs yet."
-          }</p>`
-        }
       </div>
     </section>
   `;
