@@ -308,13 +308,13 @@ body::after {
 .table--logs .table-head,
 .table--logs .table-row {
   grid-template-columns:
+    minmax(160px, 190px)
     minmax(150px, 180px)
-    minmax(120px, 150px)
-    minmax(110px, 130px)
-    minmax(140px, 180px)
+    minmax(120px, 140px)
+    minmax(150px, 200px)
     minmax(130px, 160px)
     minmax(180px, 240px)
-    minmax(240px, 1fr);
+    minmax(260px, 1fr);
 }
 
 .table-url {
@@ -323,10 +323,22 @@ body::after {
 
 .table--logs .table-row > span {
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .table--logs .table-row > span:nth-child(-n + 5) {
   white-space: nowrap;
+}
+
+.table--logs .table-row > span:nth-child(n + 6) {
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
+}
+
+.table--logs .tag {
+  max-width: 100%;
 }
 
 .about-grid {
