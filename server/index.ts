@@ -511,6 +511,7 @@ const statements = {
   deleteFirmwareByKey: db.prepare(
     "DELETE FROM firmware_catalog WHERE vendor = ? AND model = ? AND version = ?"
   ),
+  clearFirmwareCatalog: db.prepare("DELETE FROM firmware_catalog"),
   purgeExternalFirmware: db.prepare(
     "DELETE FROM firmware_catalog WHERE url LIKE ? OR source LIKE ?"
   ),
@@ -543,6 +544,14 @@ const statements = {
     SET firmware_pending = 0, firmware_sent_at = ?, updated_at = ?
     WHERE id = ?
   `),
+  clearFirmwareAssignments: db.prepare(`
+    UPDATE devices
+    SET firmware_id = NULL,
+        firmware_pending = 0,
+        firmware_requested_at = NULL,
+        firmware_sent_at = NULL,
+        updated_at = ?
+  `),
   insertSession: db.prepare(
     "INSERT INTO sessions (token, created_at, expires_at) VALUES (?, ?, ?)"
   ),
@@ -552,6 +561,7 @@ const statements = {
     "DELETE FROM sessions WHERE expires_at <= ?"
   ),
   getSetting: db.prepare("SELECT value FROM settings WHERE key = ?"),
+  deleteSetting: db.prepare("DELETE FROM settings WHERE key = ?"),
   setSetting: db.prepare(`
     INSERT INTO settings (key, value)
     VALUES (?, ?)
@@ -575,6 +585,24 @@ if (ADMIN_PASS === "change-me") {
 
 const FIRMWARE_SOURCE = "local";
 const firmwareUpload = multer({ dest: firmwareTmpDir });
+
+async function clearFirmwareFiles(): Promise<void> {
+  await fs.promises.mkdir(FIRMWARE_DIR, { recursive: true });
+  const entries = await fs.promises.readdir(FIRMWARE_DIR, {
+    withFileTypes: true,
+  });
+  await Promise.all(
+    entries.map(async (entry) => {
+      const fullPath = path.join(FIRMWARE_DIR, entry.name);
+      if (entry.name === ".tmp") {
+        await fs.promises.rm(fullPath, { recursive: true, force: true });
+        await fs.promises.mkdir(fullPath, { recursive: true });
+        return;
+      }
+      await fs.promises.rm(fullPath, { recursive: true, force: true });
+    })
+  );
+}
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -1955,6 +1983,10 @@ function renderFirmwarePage({
           }>Import Yealink firmware catalog</button>
         </form>
         <p class="helper">One-time import downloads Yealink firmware into local storage. Leave this page open while it runs.</p>
+        <form method="post" action="/admin/firmware/clear" class="form-grid form-grid--tight" onsubmit="return confirm('Clear the firmware catalog and delete stored files?');">
+          <button class="button button--ghost" type="submit">Clear firmware catalog</button>
+        </form>
+        <p class="helper">Clearing removes all catalog entries and deletes stored firmware files.</p>
       </div>
     </section>
 
@@ -2823,6 +2855,26 @@ app.post("/admin/firmware/import", requireAuth, async (request, response) => {
   } catch (error) {
     response.redirect(
       buildNoticeUrl("/admin/firmware", "error", "Firmware import failed.")
+    );
+  }
+});
+
+app.post("/admin/firmware/clear", requireAuth, async (request, response) => {
+  try {
+    await clearFirmwareFiles();
+    const now = new Date().toISOString();
+    const transaction = db.transaction(() => {
+      statements.clearFirmwareCatalog.run();
+      statements.clearFirmwareAssignments.run(now);
+      statements.deleteSetting.run("firmware_imported_at");
+    });
+    transaction();
+    response.redirect(
+      buildNoticeUrl("/admin/firmware", "notice", "Firmware catalog cleared.")
+    );
+  } catch (error) {
+    response.redirect(
+      buildNoticeUrl("/admin/firmware", "error", "Failed to clear firmware.")
     );
   }
 });
