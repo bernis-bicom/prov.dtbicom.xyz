@@ -137,6 +137,7 @@ current registration contact.
 - `FIRMWARE_DIR`: firmware file storage directory (default `data/firmware`).
 - `FIRMWARE_BASE_URL`: base URL for firmware downloads (optional).
 - `FIRMWARE_IMPORT_ENABLED`: set to `0` to hide the import button.
+- `FIRMWARE_IMPORT_URLS`: comma-separated catalog URLs for firmware import.
 
 ## Data storage
 

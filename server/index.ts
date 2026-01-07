@@ -56,6 +56,10 @@ const FIRMWARE_DIR =
 const FIRMWARE_BASE_URL = process.env.FIRMWARE_BASE_URL || "";
 const FIRMWARE_IMPORT_ENABLED =
   process.env.FIRMWARE_IMPORT_ENABLED !== "0";
+const FIRMWARE_IMPORT_URLS = (process.env.FIRMWARE_IMPORT_URLS || "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
 
 const dataDir = path.dirname(DB_PATH);
 if (!fs.existsSync(dataDir)) {
@@ -512,9 +516,6 @@ const statements = {
     "DELETE FROM firmware_catalog WHERE vendor = ? AND model = ? AND version = ?"
   ),
   clearFirmwareCatalog: db.prepare("DELETE FROM firmware_catalog"),
-  purgeExternalFirmware: db.prepare(
-    "DELETE FROM firmware_catalog WHERE url LIKE ? OR source LIKE ?"
-  ),
   insertFirmware: db.prepare(`
     INSERT INTO firmware_catalog
       (vendor, model, version, url, source, fetched_at, created_at, updated_at)
@@ -1982,7 +1983,7 @@ function renderFirmwarePage({
             importReady ? "" : " disabled"
           }>Import Yealink firmware catalog</button>
         </form>
-        <p class="helper">One-time import downloads Yealink firmware into local storage. Leave this page open while it runs.</p>
+        <p class="helper">One-time import downloads Yealink firmware into local storage from the configured catalog URLs. Leave this page open while it runs.</p>
         <form method="post" action="/admin/firmware/clear" class="form-grid form-grid--tight" onsubmit="return confirm('Clear the firmware catalog and delete stored files?');">
           <button class="button button--ghost" type="submit">Clear firmware catalog</button>
         </form>
@@ -2737,10 +2738,17 @@ app.post("/admin/firmware/import", requireAuth, async (request, response) => {
     return;
   }
   try {
-    const seedUrls = [
-      "https://www.3cx.com/docs/phone-firmwares/",
-      "https://www.3cx.com/docs/phone-firmware-v18/",
-    ];
+    const seedUrls = FIRMWARE_IMPORT_URLS;
+    if (!seedUrls.length) {
+      response.redirect(
+        buildNoticeUrl(
+          "/admin/firmware",
+          "error",
+          "Firmware import URLs are not configured."
+        )
+      );
+      return;
+    }
     const fetchOptions = {
       headers: { "user-agent": "AutoProv Switchboard firmware import" },
     };
@@ -2843,7 +2851,6 @@ app.post("/admin/firmware/import", requireAuth, async (request, response) => {
       );
       return;
     }
-    statements.purgeExternalFirmware.run("%3cx.com%", "3cx%");
     statements.setSetting.run("firmware_imported_at", now);
     response.redirect(
       buildNoticeUrl(
