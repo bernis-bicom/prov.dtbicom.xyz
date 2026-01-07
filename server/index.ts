@@ -4,8 +4,6 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
 import tls from "node:tls";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
@@ -44,6 +42,7 @@ const AMI_TIMEOUT_MS = Number.parseInt(
   process.env.AMI_TIMEOUT_MS || "4000",
   10
 );
+const AUTO_SYNC_TICK_MS = 60_000;
 const LOG_PAGE_LIMIT = Number.parseInt(
   process.env.LOG_PAGE_LIMIT || "500",
   10
@@ -54,12 +53,6 @@ const FIRMWARE_DIR =
   process.env.FIRMWARE_DIR ||
   path.join(path.dirname(DB_PATH), "firmware");
 const FIRMWARE_BASE_URL = process.env.FIRMWARE_BASE_URL || "";
-const FIRMWARE_IMPORT_ENABLED =
-  process.env.FIRMWARE_IMPORT_ENABLED !== "0";
-const FIRMWARE_IMPORT_URLS = (process.env.FIRMWARE_IMPORT_URLS || "")
-  .split(",")
-  .map((value) => value.trim())
-  .filter(Boolean);
 
 const dataDir = path.dirname(DB_PATH);
 if (!fs.existsSync(dataDir)) {
@@ -98,6 +91,10 @@ db.exec(`
     ami_tls INTEGER NOT NULL DEFAULT 0,
     ami_notify_type TEXT,
     ami_reboot_type TEXT,
+    auto_sync_enabled INTEGER NOT NULL DEFAULT 0,
+    auto_sync_interval_minutes INTEGER,
+    auto_sync_window_start TEXT,
+    auto_sync_window_end TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -189,6 +186,10 @@ ensureColumns("pbx_servers", [
   { name: "ami_tls", type: "INTEGER" },
   { name: "ami_notify_type", type: "TEXT" },
   { name: "ami_reboot_type", type: "TEXT" },
+  { name: "auto_sync_enabled", type: "INTEGER" },
+  { name: "auto_sync_interval_minutes", type: "INTEGER" },
+  { name: "auto_sync_window_start", type: "TEXT" },
+  { name: "auto_sync_window_end", type: "TEXT" },
 ]);
 
 ensureColumns("devices", [
@@ -263,6 +264,10 @@ type PbxServer = {
   ami_tls: number | null;
   ami_notify_type: string | null;
   ami_reboot_type: string | null;
+  auto_sync_enabled: number | null;
+  auto_sync_interval_minutes: number | null;
+  auto_sync_window_start: string | null;
+  auto_sync_window_end: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -333,13 +338,6 @@ type FirmwareCatalogEntry = {
   updated_at: string;
 };
 
-type FirmwareCatalogInput = {
-  vendor: string;
-  model: string;
-  version: string;
-  url: string;
-};
-
 type ProvisionLogRow = {
   id: number;
   created_at: string;
@@ -365,13 +363,13 @@ const statements = {
   getPbx: db.prepare("SELECT * FROM pbx_servers WHERE id = ?"),
   insertPbx: db.prepare(`
     INSERT INTO pbx_servers
-      (name, host, port, transport, outbound_proxy_host, outbound_proxy_port, prov_username, prov_password, upstream_base_url, upstream_username, upstream_password, upstream_mac_case, ami_host, ami_port, ami_username, ami_password, ami_tls, ami_notify_type, ami_reboot_type, created_at, updated_at)
+      (name, host, port, transport, outbound_proxy_host, outbound_proxy_port, prov_username, prov_password, upstream_base_url, upstream_username, upstream_password, upstream_mac_case, ami_host, ami_port, ami_username, ami_password, ami_tls, ami_notify_type, ami_reboot_type, auto_sync_enabled, auto_sync_interval_minutes, auto_sync_window_start, auto_sync_window_end, created_at, updated_at)
     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   updatePbx: db.prepare(`
     UPDATE pbx_servers
-    SET name = ?, host = ?, port = ?, transport = ?, outbound_proxy_host = ?, outbound_proxy_port = ?, prov_username = ?, prov_password = ?, upstream_base_url = ?, upstream_username = ?, upstream_password = ?, upstream_mac_case = ?, ami_host = ?, ami_port = ?, ami_username = ?, ami_password = ?, ami_tls = ?, ami_notify_type = ?, ami_reboot_type = ?, updated_at = ?
+    SET name = ?, host = ?, port = ?, transport = ?, outbound_proxy_host = ?, outbound_proxy_port = ?, prov_username = ?, prov_password = ?, upstream_base_url = ?, upstream_username = ?, upstream_password = ?, upstream_mac_case = ?, ami_host = ?, ami_port = ?, ami_username = ?, ami_password = ?, ami_tls = ?, ami_notify_type = ?, ami_reboot_type = ?, auto_sync_enabled = ?, auto_sync_interval_minutes = ?, auto_sync_window_start = ?, auto_sync_window_end = ?, updated_at = ?
     WHERE id = ?
   `),
   deletePbx: db.prepare("DELETE FROM pbx_servers WHERE id = ?"),
@@ -479,6 +477,17 @@ const statements = {
     ORDER BY created_at DESC
     LIMIT ?
   `),
+  listLatestProvisionLogs: db.prepare(`
+    SELECT l.*
+    FROM provisioning_logs l
+    JOIN (
+      SELECT mac, MAX(created_at) AS created_at
+      FROM provisioning_logs
+      GROUP BY mac
+    ) latest
+      ON l.mac = latest.mac
+     AND l.created_at = latest.created_at
+  `),
   listProvisionLogsFiltered: db.prepare(`
     SELECT * FROM provisioning_logs
     WHERE mac LIKE ? COLLATE NOCASE
@@ -561,13 +570,6 @@ const statements = {
   deleteExpiredSessions: db.prepare(
     "DELETE FROM sessions WHERE expires_at <= ?"
   ),
-  getSetting: db.prepare("SELECT value FROM settings WHERE key = ?"),
-  deleteSetting: db.prepare("DELETE FROM settings WHERE key = ?"),
-  setSetting: db.prepare(`
-    INSERT INTO settings (key, value)
-    VALUES (?, ?)
-    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-  `),
 };
 
 const app = express();
@@ -669,73 +671,6 @@ function getFirmwareBaseUrl(request: Request): string {
   }
   const host = request.get("host") ?? "localhost";
   return `${request.protocol}://${host}/firmware`;
-}
-
-async function downloadToFile(url: string, filePath: string): Promise<void> {
-  const response = await fetch(url, {
-    headers: { "user-agent": "AutoProv Switchboard firmware import" },
-  });
-  if (!response.ok || !response.body) {
-    throw new Error(`Download failed (${response.status})`);
-  }
-  const tempPath = `${filePath}.tmp-${crypto.randomUUID()}`;
-  try {
-    await pipeline(
-      Readable.fromWeb(response.body as any),
-      fs.createWriteStream(tempPath)
-    );
-    await fs.promises.rename(tempPath, filePath);
-  } catch (error) {
-    await fs.promises.rm(tempPath, { force: true });
-    throw error;
-  }
-}
-
-function decodeHtml(value: string): string {
-  return value
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, "\"")
-    .replace(/&#39;/g, "'");
-}
-
-function cleanHtmlText(value: string): string {
-  return decodeHtml(value.replace(/<[^>]+>/g, ""))
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function parseFirmwareCatalog(html: string, baseUrl: string): FirmwareCatalogInput[] {
-  const tableMatch = html.match(
-    /<table class="firmwares"[^>]*>([\s\S]*?)<\/table>/i
-  );
-  if (!tableMatch) return [];
-  const tableHtml = tableMatch[1];
-  const rowRegex =
-    /<tr[^>]*>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<td[^>]*>[\s\S]*?<\/td>\s*<td[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>/gi;
-  const entries: FirmwareCatalogInput[] = [];
-  let match: RegExpExecArray | null = null;
-  while ((match = rowRegex.exec(tableHtml)) !== null) {
-    const model = cleanHtmlText(match[1] ?? "");
-    const version = cleanHtmlText(match[2] ?? "");
-    const urlRaw = (match[3] ?? "").trim();
-    if (!model || !version || !urlRaw) continue;
-    let url: string;
-    try {
-      url = new URL(urlRaw, baseUrl).toString();
-    } catch (error) {
-      continue;
-    }
-    const vendor = model.split(" ")[0] || "Unknown";
-    entries.push({
-      vendor,
-      model,
-      version,
-      url,
-    });
-  }
-  return entries;
 }
 
 function resolveDeviceFirmwareUrl(device: DeviceWithPbx): string | null {
@@ -937,6 +872,69 @@ async function createAmiClient(options: {
   });
 }
 
+async function sendAmiNotifyBatch(options: {
+  pbx: PbxServer;
+  devices: DeviceWithPbx[];
+  option: string;
+}): Promise<{ sent: number; failed: number; skipped: number }> {
+  const { pbx, devices, option } = options;
+  let client: Awaited<ReturnType<typeof createAmiClient>> | null = null;
+  let sent = 0;
+  let failed = 0;
+  let skipped = 0;
+  const endpoints = new Set<string>();
+  for (const device of devices) {
+    const endpoint = String(
+      device.pjsip_endpoint || device.auth_user || ""
+    ).trim();
+    if (!endpoint) {
+      skipped += 1;
+      continue;
+    }
+    endpoints.add(endpoint);
+  }
+  if (!endpoints.size) {
+    return { sent, failed, skipped };
+  }
+  try {
+    client = await createAmiClient({
+      host: pbx.ami_host as string,
+      port: pbx.ami_port || 5038,
+      useTls: pbx.ami_tls === 1,
+    });
+    const login = await client.sendAction({
+      Action: "Login",
+      Username: pbx.ami_username as string,
+      Secret: pbx.ami_password as string,
+    });
+    if (login.Response !== "Success") {
+      throw new Error(login.Message || "AMI login failed.");
+    }
+    for (const endpoint of endpoints) {
+      try {
+        const notify = await client.sendAction({
+          Action: "PJSIPNotify",
+          Endpoint: endpoint,
+          Option: option,
+        });
+        if (notify.Response !== "Success") {
+          failed += 1;
+        } else {
+          sent += 1;
+        }
+      } catch (error) {
+        failed += 1;
+      }
+    }
+    await client.sendAction({ Action: "Logoff" }).catch(() => undefined);
+  } finally {
+    if (client) {
+      client.close();
+    }
+  }
+  return { sent, failed, skipped };
+}
+
 function buildNoticeUrl(
   baseUrl: string,
   kind: "error" | "notice",
@@ -1026,6 +1024,63 @@ function getUpstreamAuthHeader(device: DeviceWithPbx): string | null {
     `${device.pbx_upstream_username}:${device.pbx_upstream_password}`
   ).toString("base64");
   return `Basic ${token}`;
+}
+
+const autoSyncLastRun = new Map<number, number>();
+
+async function runAutoCheckSync(): Promise<void> {
+  const pbxServers = statements.listPbx.all() as PbxServer[];
+  if (!pbxServers.length) return;
+  const devices = statements.listDevices.all() as DeviceWithPbx[];
+  if (!devices.length) return;
+  const devicesByPbx = new Map<number, DeviceWithPbx[]>();
+  for (const device of devices) {
+    const list = devicesByPbx.get(device.pbx_server_id) ?? [];
+    list.push(device);
+    devicesByPbx.set(device.pbx_server_id, list);
+  }
+  const now = new Date();
+  const nowMs = now.getTime();
+  for (const pbx of pbxServers) {
+    const enabled = Boolean(pbx.auto_sync_enabled);
+    if (!enabled) continue;
+    const intervalMinutes = pbx.auto_sync_interval_minutes || 0;
+    if (intervalMinutes <= 0) continue;
+    if (!pbx.ami_host || !pbx.ami_username || !pbx.ami_password) continue;
+    if (!isWithinWindow(now, pbx.auto_sync_window_start, pbx.auto_sync_window_end)) {
+      continue;
+    }
+    const lastRun = autoSyncLastRun.get(pbx.id) ?? 0;
+    if (nowMs - lastRun < intervalMinutes * 60 * 1000) {
+      continue;
+    }
+    const pbxDevices = devicesByPbx.get(pbx.id) ?? [];
+    if (!pbxDevices.length) {
+      autoSyncLastRun.set(pbx.id, nowMs);
+      continue;
+    }
+    autoSyncLastRun.set(pbx.id, nowMs);
+    const option = pbx.ami_notify_type || "yealink-notify";
+    try {
+      const result = await sendAmiNotifyBatch({
+        pbx,
+        devices: pbxDevices,
+        option,
+      });
+      console.info(
+        JSON.stringify({
+          ts: new Date().toISOString(),
+          event: "auto_check_sync",
+          pbx: pbx.name,
+          sent: result.sent,
+          failed: result.failed,
+          skipped: result.skipped,
+        })
+      );
+    } catch (error) {
+      console.warn("Auto check-sync failed.", error);
+    }
+  }
 }
 
 function getUpstreamCredentials(
@@ -1162,6 +1217,61 @@ function formatParisTimestamp(value: string | null): string {
       .map((part) => [part.type, part.value])
   );
   return `${lookup.year}-${lookup.month}-${lookup.day} ${lookup.hour}:${lookup.minute}:${lookup.second}`;
+}
+
+function normalizeTimeWindow(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const [hoursRaw, minutesRaw] = trimmed.split(":");
+  if (hoursRaw === undefined || minutesRaw === undefined) return null;
+  const hours = Number.parseInt(hoursRaw, 10);
+  const minutes = Number.parseInt(minutesRaw, 10);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return null;
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function parseTimeToMinutes(value: string | null): number | null {
+  if (!value) return null;
+  const [hoursRaw, minutesRaw] = value.split(":");
+  if (hoursRaw === undefined || minutesRaw === undefined) return null;
+  const hours = Number.parseInt(hoursRaw, 10);
+  const minutes = Number.parseInt(minutesRaw, 10);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return null;
+  return hours * 60 + minutes;
+}
+
+function getParisMinutes(now: Date): number {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Paris",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+  const lookup = Object.fromEntries(
+    parts
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value])
+  );
+  const hours = Number.parseInt(lookup.hour || "0", 10);
+  const minutes = Number.parseInt(lookup.minute || "0", 10);
+  return hours * 60 + minutes;
+}
+
+function isWithinWindow(
+  now: Date,
+  start: string | null,
+  end: string | null
+): boolean {
+  const startMinutes = parseTimeToMinutes(start);
+  const endMinutes = parseTimeToMinutes(end);
+  if (startMinutes === null || endMinutes === null) return true;
+  if (startMinutes === endMinutes) return true;
+  const current = getParisMinutes(now);
+  if (startMinutes < endMinutes) {
+    return current >= startMinutes && current < endMinutes;
+  }
+  return current >= startMinutes || current < endMinutes;
 }
 type AdminNavKey = "overview" | "pbx" | "devices" | "firmware" | "logs" | "about";
 
@@ -1377,6 +1487,30 @@ function buildPbxRows(pbxServers: PbxServer[]): string {
               server.ami_reboot_type || "yealink-reboot"
             )}" placeholder="yealink-reboot" />
           </label>
+          <label class="field field--checkbox">
+            <span>Auto check-sync</span>
+            <input name="auto_sync_enabled" type="checkbox" value="1"${
+              server.auto_sync_enabled ? " checked" : ""
+            } />
+          </label>
+          <label class="field">
+            <span>Auto interval (minutes)</span>
+            <input name="auto_sync_interval_minutes" type="number" min="1" max="1440" value="${escapeHtml(
+              server.auto_sync_interval_minutes || ""
+            )}" placeholder="15" />
+          </label>
+          <label class="field">
+            <span>Auto window start</span>
+            <input name="auto_sync_window_start" type="text" value="${escapeHtml(
+              server.auto_sync_window_start || ""
+            )}" placeholder="08:00" />
+          </label>
+          <label class="field">
+            <span>Auto window end</span>
+            <input name="auto_sync_window_end" type="text" value="${escapeHtml(
+              server.auto_sync_window_end || ""
+            )}" placeholder="18:00" />
+          </label>
           <div class="form-actions">
             <button class="button" type="submit">Save</button>
           </div>
@@ -1397,11 +1531,13 @@ function buildDeviceRows({
   devices,
   pbxServers,
   firmwareCatalog,
+  latestProvisionByMac,
   baseUrl,
 }: {
   devices: DeviceWithPbx[];
   pbxServers: PbxServer[];
   firmwareCatalog: FirmwareCatalogEntry[];
+  latestProvisionByMac: Map<string, ProvisionLogRow>;
   baseUrl: string;
 }): string {
   return devices
@@ -1427,6 +1563,53 @@ function buildDeviceRows({
           device.pbx_ami_password &&
           notifyEndpoint
       );
+      const latestProvision = latestProvisionByMac.get(device.mac);
+      const statusTagClass = latestProvision
+        ? latestProvision.status === "ok"
+          ? "tag--ok"
+          : latestProvision.status === "unauthorized"
+            ? "tag--warn"
+            : latestProvision.status === "not_found"
+              ? "tag--neutral"
+              : "tag--error"
+        : "tag--neutral";
+      const latestProvisionMarkup = latestProvision
+        ? `
+        <div class="item-meta">
+          <div class="meta-label">Last provision</div>
+          <div class="meta-grid">
+            <span class="tag mono">${escapeHtml(
+              formatParisTimestamp(latestProvision.created_at)
+            )}</span>
+            <span class="tag ${statusTagClass}">${escapeHtml(
+              latestProvision.status
+            )}</span>
+            ${
+              latestProvision.pbx
+                ? `<span class="tag">${escapeHtml(latestProvision.pbx)}</span>`
+                : ""
+            }
+            <span class="tag mono">${escapeHtml(latestProvision.ip)}</span>
+            ${
+              latestProvision.reason
+                ? `<span class="tag tag--neutral">${escapeHtml(
+                    latestProvision.reason
+                  )}</span>`
+                : ""
+            }
+            <span class="tag mono">${escapeHtml(
+              formatMac(latestProvision.mac)
+            )}</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-key">User agent</span>
+            <span class="meta-value mono">${escapeHtml(
+              latestProvision.user_agent
+            )}</span>
+          </div>
+        </div>
+      `
+        : `<p class="helper">No provisioning requests yet.</p>`;
       return `
       <article class="item reveal" style="--delay:${delay}ms">
         <form method="post" action="/admin/devices/${device.id}" class="form-grid form-grid--tight">
@@ -1520,6 +1703,7 @@ function buildDeviceRows({
             formatTimestamp(device.firmware_sent_at)
           )}</span>
         </div>
+        ${latestProvisionMarkup}
         <form method="post" action="/admin/devices/${device.id}/firmware/trigger" class="inline-form">
           <button class="button button--ghost" type="submit"${
             firmwareUrl ? "" : " disabled"
@@ -1674,6 +1858,7 @@ function renderPbxPage({
         <p class="helper">AMI settings enable check-sync notifications (PJSIPNotify) for instant reprovisioning.</p>
         <p class="helper">Use "Test AMI" after saving to verify credentials before triggering check-sync or reboot.</p>
         <p class="helper">PBXware defaults: notify type "yealink-notify" and reboot type "yealink-reboot".</p>
+        <p class="helper">Auto check-sync uses Europe/Paris time for the window settings.</p>
       </div>
       <form method="post" action="/admin/pbx-servers" class="form-grid">
         <label class="field">
@@ -1762,6 +1947,22 @@ function renderPbxPage({
           <span>AMI reboot type</span>
           <input name="ami_reboot_type" type="text" value="yealink-reboot" />
         </label>
+        <label class="field field--checkbox">
+          <span>Auto check-sync</span>
+          <input name="auto_sync_enabled" type="checkbox" value="1" />
+        </label>
+        <label class="field">
+          <span>Auto interval (minutes)</span>
+          <input name="auto_sync_interval_minutes" type="number" min="1" max="1440" placeholder="15" />
+        </label>
+        <label class="field">
+          <span>Auto window start</span>
+          <input name="auto_sync_window_start" type="text" placeholder="08:00" />
+        </label>
+        <label class="field">
+          <span>Auto window end</span>
+          <input name="auto_sync_window_end" type="text" placeholder="18:00" />
+        </label>
         <div class="form-actions">
           <button class="button" type="submit">Add server</button>
         </div>
@@ -1793,12 +1994,14 @@ function renderDevicesPage({
   pbxServers,
   devices,
   firmwareCatalog,
+  latestProvisionByMac,
   message,
 }: {
   request: Request;
   pbxServers: PbxServer[];
   devices: DeviceWithPbx[];
   firmwareCatalog: FirmwareCatalogEntry[];
+  latestProvisionByMac: Map<string, ProvisionLogRow>;
   message: NoticeMessage | null;
 }): string {
   const host = request.get("host") ?? "localhost";
@@ -1820,6 +2023,7 @@ function renderDevicesPage({
     devices,
     pbxServers,
     firmwareCatalog,
+    latestProvisionByMac,
     baseUrl,
   });
   const header = `
@@ -1919,13 +2123,11 @@ function renderFirmwarePage({
   request,
   firmwareCatalog,
   firmwareStats,
-  firmwareImportedAt,
   message,
 }: {
   request: Request;
   firmwareCatalog: FirmwareCatalogEntry[];
   firmwareStats: { count: number; last_fetched_at: string | null };
-  firmwareImportedAt: string | null;
   message: NoticeMessage | null;
 }): string {
   const firmwareCount = firmwareStats.count || 0;
@@ -1960,7 +2162,6 @@ function renderFirmwarePage({
       <p class="subhead">Manage firmware URLs for one-shot updates.</p>
     </div>
   `;
-  const importReady = FIRMWARE_IMPORT_ENABLED && !firmwareImportedAt;
   const content = `
     <section class="card">
       <div class="card-header">
@@ -1969,21 +2170,8 @@ function renderFirmwarePage({
         <p class="helper">Entries: ${escapeHtml(
           firmwareCount
         )} &bull; Last change: ${escapeHtml(firmwareLastSync)}</p>
-        ${
-          firmwareImportedAt
-            ? `<p class="helper">Import completed: ${escapeHtml(
-                formatTimestamp(firmwareImportedAt)
-              )}</p>`
-            : ""
-        }
       </div>
       <div class="card-actions">
-        <form method="post" action="/admin/firmware/import" class="form-grid form-grid--tight">
-          <button class="button" type="submit"${
-            importReady ? "" : " disabled"
-          }>Import Yealink firmware catalog</button>
-        </form>
-        <p class="helper">One-time import downloads Yealink firmware into local storage from the configured catalog URLs. Leave this page open while it runs.</p>
         <form method="post" action="/admin/firmware/clear" class="form-grid form-grid--tight" onsubmit="return confirm('Clear the firmware catalog and delete stored files?');">
           <button class="button button--ghost" type="submit">Clear firmware catalog</button>
         </form>
@@ -2301,12 +2489,25 @@ app.get("/admin/devices", requireAuth, (request, response) => {
   const pbxServers = statements.listPbx.all() as PbxServer[];
   const devices = statements.listDevices.all() as DeviceWithPbx[];
   const firmwareCatalog = statements.listFirmware.all() as FirmwareCatalogEntry[];
+  const latestLogs = statements.listLatestProvisionLogs.all() as
+    | ProvisionLogRow[]
+    | undefined;
+  const deviceMacs = new Set(devices.map((device) => device.mac));
+  const latestProvisionByMac = new Map<string, ProvisionLogRow>();
+  if (latestLogs) {
+    for (const log of latestLogs) {
+      if (deviceMacs.has(log.mac)) {
+        latestProvisionByMac.set(log.mac, log);
+      }
+    }
+  }
   response.send(
     renderDevicesPage({
       request,
       pbxServers,
       devices,
       firmwareCatalog,
+      latestProvisionByMac,
       message,
     })
   );
@@ -2318,10 +2519,6 @@ app.get("/admin/firmware", requireAuth, (request, response) => {
   const firmwareStatsRow = statements.getFirmwareStats.get() as
     | { count: number; last_fetched_at: string | null }
     | undefined;
-  const importedRow = statements.getSetting.get(
-    "firmware_imported_at"
-  ) as { value: string } | undefined;
-  const firmwareImportedAt = importedRow?.value ?? null;
   const firmwareStats = {
     count: firmwareStatsRow?.count ?? 0,
     last_fetched_at: firmwareStatsRow?.last_fetched_at ?? null,
@@ -2331,7 +2528,6 @@ app.get("/admin/firmware", requireAuth, (request, response) => {
       request,
       firmwareCatalog,
       firmwareStats,
-      firmwareImportedAt,
       message,
     })
   );
@@ -2457,6 +2653,40 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
   const amiRebootTypeInput = String(
     request.body.ami_reboot_type || ""
   ).trim();
+  const autoSyncEnabled = request.body.auto_sync_enabled === "1" ? 1 : 0;
+  const autoSyncIntervalInput = parseInteger(
+    request.body.auto_sync_interval_minutes,
+    0
+  );
+  const windowStartInput = String(
+    request.body.auto_sync_window_start || ""
+  ).trim();
+  const windowEndInput = String(
+    request.body.auto_sync_window_end || ""
+  ).trim();
+  const autoSyncWindowStart = windowStartInput
+    ? normalizeTimeWindow(windowStartInput)
+    : null;
+  const autoSyncWindowEnd = windowEndInput
+    ? normalizeTimeWindow(windowEndInput)
+    : null;
+  const autoSyncEnabled = request.body.auto_sync_enabled === "1" ? 1 : 0;
+  const autoSyncIntervalInput = parseInteger(
+    request.body.auto_sync_interval_minutes,
+    0
+  );
+  const windowStartInput = String(
+    request.body.auto_sync_window_start || ""
+  ).trim();
+  const windowEndInput = String(
+    request.body.auto_sync_window_end || ""
+  ).trim();
+  const autoSyncWindowStart = windowStartInput
+    ? normalizeTimeWindow(windowStartInput)
+    : null;
+  const autoSyncWindowEnd = windowEndInput
+    ? normalizeTimeWindow(windowEndInput)
+    : null;
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
@@ -2506,6 +2736,49 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
     );
     return;
   }
+  if (
+    autoSyncIntervalInput &&
+    (autoSyncIntervalInput < 1 || autoSyncIntervalInput > 1440)
+  ) {
+    response.redirect(
+      buildNoticeUrl(
+        "/admin/pbx",
+        "error",
+        "Auto check-sync interval must be between 1 and 1440 minutes."
+      )
+    );
+    return;
+  }
+  if ((windowStartInput || windowEndInput) && (!autoSyncWindowStart || !autoSyncWindowEnd)) {
+    response.redirect(
+      buildNoticeUrl(
+        "/admin/pbx",
+        "error",
+        "Auto check-sync window must use HH:MM for both start and end."
+      )
+    );
+    return;
+  }
+  if (autoSyncEnabled && !autoSyncIntervalInput) {
+    response.redirect(
+      buildNoticeUrl(
+        "/admin/pbx",
+        "error",
+        "Auto check-sync interval must be set when enabled."
+      )
+    );
+    return;
+  }
+  if (autoSyncEnabled && (!amiHostInput || !amiUser || !amiPass)) {
+    response.redirect(
+      buildNoticeUrl(
+        "/admin/pbx",
+        "error",
+        "Auto check-sync requires AMI host, username, and password."
+      )
+    );
+    return;
+  }
   const amiHost = amiHostInput || null;
   const amiPort = amiHost ? amiPortInput : null;
   const amiUsername = amiHost ? amiUser : null;
@@ -2513,6 +2786,8 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
   const amiTlsValue = amiHost ? amiTls : 0;
   const amiNotifyType = amiNotifyTypeInput || null;
   const amiRebootType = amiRebootTypeInput || null;
+  const autoSyncIntervalMinutes =
+    autoSyncIntervalInput > 0 ? autoSyncIntervalInput : null;
 
   const now = new Date().toISOString();
   statements.insertPbx.run(
@@ -2535,6 +2810,10 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
     amiTlsValue,
     amiNotifyType,
     amiRebootType,
+    autoSyncEnabled,
+    autoSyncIntervalMinutes,
+    autoSyncWindowStart,
+    autoSyncWindowEnd,
     now,
     now
   );
@@ -2629,6 +2908,49 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
     );
     return;
   }
+  if (
+    autoSyncIntervalInput &&
+    (autoSyncIntervalInput < 1 || autoSyncIntervalInput > 1440)
+  ) {
+    response.redirect(
+      buildNoticeUrl(
+        "/admin/pbx",
+        "error",
+        "Auto check-sync interval must be between 1 and 1440 minutes."
+      )
+    );
+    return;
+  }
+  if ((windowStartInput || windowEndInput) && (!autoSyncWindowStart || !autoSyncWindowEnd)) {
+    response.redirect(
+      buildNoticeUrl(
+        "/admin/pbx",
+        "error",
+        "Auto check-sync window must use HH:MM for both start and end."
+      )
+    );
+    return;
+  }
+  if (autoSyncEnabled && !autoSyncIntervalInput) {
+    response.redirect(
+      buildNoticeUrl(
+        "/admin/pbx",
+        "error",
+        "Auto check-sync interval must be set when enabled."
+      )
+    );
+    return;
+  }
+  if (autoSyncEnabled && (!amiHostInput || !amiUser || !amiPass)) {
+    response.redirect(
+      buildNoticeUrl(
+        "/admin/pbx",
+        "error",
+        "Auto check-sync requires AMI host, username, and password."
+      )
+    );
+    return;
+  }
   const amiHost = amiHostInput || null;
   const amiPort = amiHost ? amiPortInput : null;
   const amiUsername = amiHost ? amiUser : null;
@@ -2636,6 +2958,8 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
   const amiTlsValue = amiHost ? amiTls : 0;
   const amiNotifyType = amiNotifyTypeInput || null;
   const amiRebootType = amiRebootTypeInput || null;
+  const autoSyncIntervalMinutes =
+    autoSyncIntervalInput > 0 ? autoSyncIntervalInput : null;
 
   const now = new Date().toISOString();
   statements.updatePbx.run(
@@ -2658,6 +2982,10 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
     amiTlsValue,
     amiNotifyType,
     amiRebootType,
+    autoSyncEnabled,
+    autoSyncIntervalMinutes,
+    autoSyncWindowStart,
+    autoSyncWindowEnd,
     now,
     id
   );
@@ -2730,142 +3058,6 @@ app.post(
   }
 );
 
-app.post("/admin/firmware/import", requireAuth, async (request, response) => {
-  if (!FIRMWARE_IMPORT_ENABLED) {
-    response.redirect(
-      buildNoticeUrl("/admin/firmware", "error", "Firmware import is disabled.")
-    );
-    return;
-  }
-  try {
-    const seedUrls = FIRMWARE_IMPORT_URLS;
-    if (!seedUrls.length) {
-      response.redirect(
-        buildNoticeUrl(
-          "/admin/firmware",
-          "error",
-          "Firmware import URLs are not configured."
-        )
-      );
-      return;
-    }
-    const fetchOptions = {
-      headers: { "user-agent": "AutoProv Switchboard firmware import" },
-    };
-    const responses = await Promise.all(
-      seedUrls.map((url) => fetch(url, fetchOptions))
-    );
-    const failedResponse = responses.find((res) => !res.ok);
-    if (failedResponse) {
-      response.redirect(
-        buildNoticeUrl(
-          "/admin/firmware",
-          "error",
-          `Firmware import failed (${failedResponse.status}).`
-        )
-      );
-      return;
-    }
-    const htmlPages = await Promise.all(responses.map((res) => res.text()));
-    const parsed = htmlPages.flatMap((html, index) =>
-      parseFirmwareCatalog(html, seedUrls[index] || "")
-    );
-    const yealinkEntries = parsed.filter(
-      (entry) => entry.vendor.toLowerCase() === "yealink"
-    );
-    if (!yealinkEntries.length) {
-      response.redirect(
-        buildNoticeUrl(
-          "/admin/firmware",
-          "error",
-          "No Yealink firmware entries found."
-        )
-      );
-      return;
-    }
-    const unique = new Map<string, FirmwareCatalogInput>();
-    for (const entry of yealinkEntries) {
-      const key = `${entry.vendor}||${entry.model}||${entry.version}`;
-      if (!unique.has(key)) {
-        unique.set(key, entry);
-      }
-    }
-    const entries = Array.from(unique.values());
-    const baseUrl = getFirmwareBaseUrl(request);
-    const now = new Date().toISOString();
-    let successCount = 0;
-    let failureCount = 0;
-    const concurrency = 4;
-    const queue = entries.slice();
-
-    const workers = Array.from({ length: concurrency }, async () => {
-      while (queue.length) {
-        const entry = queue.shift();
-        if (!entry) break;
-        try {
-          const extension = sanitizeExtension(
-            path.extname(new URL(entry.url).pathname || "")
-          );
-          const fileName = buildFirmwareFileName({
-            vendor: entry.vendor,
-            model: entry.model,
-            version: entry.version,
-            extension,
-          });
-          const filePath = path.join(FIRMWARE_DIR, fileName);
-          await downloadToFile(entry.url, filePath);
-          const localUrl = `${baseUrl}/${encodeURIComponent(fileName)}`;
-          const transaction = db.transaction(() => {
-            statements.deleteFirmwareByKey.run(
-              entry.vendor,
-              entry.model,
-              entry.version
-            );
-            statements.insertFirmware.run(
-              entry.vendor,
-              entry.model,
-              entry.version,
-              localUrl,
-              FIRMWARE_SOURCE,
-              now,
-              now,
-              now
-            );
-          });
-          transaction();
-          successCount += 1;
-        } catch (error) {
-          failureCount += 1;
-        }
-      }
-    });
-
-    await Promise.all(workers);
-    if (successCount === 0) {
-      response.redirect(
-        buildNoticeUrl(
-          "/admin/firmware",
-          "error",
-          "Firmware import failed (no files downloaded)."
-        )
-      );
-      return;
-    }
-    statements.setSetting.run("firmware_imported_at", now);
-    response.redirect(
-      buildNoticeUrl(
-        "/admin/firmware",
-        "notice",
-        `Yealink firmware import complete (${successCount} ok, ${failureCount} failed).`
-      )
-    );
-  } catch (error) {
-    response.redirect(
-      buildNoticeUrl("/admin/firmware", "error", "Firmware import failed.")
-    );
-  }
-});
-
 app.post("/admin/firmware/clear", requireAuth, async (request, response) => {
   try {
     await clearFirmwareFiles();
@@ -2873,7 +3065,6 @@ app.post("/admin/firmware/clear", requireAuth, async (request, response) => {
     const transaction = db.transaction(() => {
       statements.clearFirmwareCatalog.run();
       statements.clearFirmwareAssignments.run(now);
-      statements.deleteSetting.run("firmware_imported_at");
     });
     transaction();
     response.redirect(
@@ -3529,3 +3720,12 @@ app.get("/yealink/:mac.cfg", async (request, response) => {
 app.listen(PORT, () => {
   console.log(`Provisioning server listening on :${PORT}`);
 });
+
+runAutoCheckSync().catch((error) => {
+  console.warn("Auto check-sync loop failed.", error);
+});
+setInterval(() => {
+  runAutoCheckSync().catch((error) => {
+    console.warn("Auto check-sync loop failed.", error);
+  });
+}, AUTO_SYNC_TICK_MS);
