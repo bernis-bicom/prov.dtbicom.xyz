@@ -2670,23 +2670,6 @@ app.post("/admin/pbx-servers", requireAuth, (request, response) => {
   const autoSyncWindowEnd = windowEndInput
     ? normalizeTimeWindow(windowEndInput)
     : null;
-  const autoSyncEnabled = request.body.auto_sync_enabled === "1" ? 1 : 0;
-  const autoSyncIntervalInput = parseInteger(
-    request.body.auto_sync_interval_minutes,
-    0
-  );
-  const windowStartInput = String(
-    request.body.auto_sync_window_start || ""
-  ).trim();
-  const windowEndInput = String(
-    request.body.auto_sync_window_end || ""
-  ).trim();
-  const autoSyncWindowStart = windowStartInput
-    ? normalizeTimeWindow(windowStartInput)
-    : null;
-  const autoSyncWindowEnd = windowEndInput
-    ? normalizeTimeWindow(windowEndInput)
-    : null;
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
@@ -2859,6 +2842,24 @@ app.post("/admin/pbx-servers/:id", requireAuth, (request, response) => {
   const amiRebootTypeInput = String(
     request.body.ami_reboot_type || ""
   ).trim();
+
+  const autoSyncEnabled = request.body.auto_sync_enabled === "1" ? 1 : 0;
+  const autoSyncIntervalInput = parseInteger(
+    request.body.auto_sync_interval_minutes,
+    0
+  );
+  const windowStartInput = String(
+    request.body.auto_sync_window_start || ""
+  ).trim();
+  const windowEndInput = String(
+    request.body.auto_sync_window_end || ""
+  ).trim();
+  const autoSyncWindowStart = windowStartInput
+    ? normalizeTimeWindow(windowStartInput)
+    : null;
+  const autoSyncWindowEnd = windowEndInput
+    ? normalizeTimeWindow(windowEndInput)
+    : null;
 
   if (!name || !host || !transport || port < 1 || port > 65535) {
     response.redirect(
