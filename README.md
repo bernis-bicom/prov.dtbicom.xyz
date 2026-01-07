@@ -95,7 +95,7 @@ Note: because HTTPS is on port 8443, users must include the port in the URL.
 1. Add a PBX server (host, port, transport, optional outbound proxy).
 2. Add a device with MAC + SIP auth credentials.
 3. The device config is generated dynamically at `/yealink/{mac}.cfg`.
-4. Optional: import a firmware catalog once, upload additional firmware files,
+4. Optional: import the Yealink firmware catalog once, upload additional firmware files,
    choose a firmware URL per device, and trigger a one-shot update.
 
 If you want BLFs/keys managed by PBXware, set the PBX server "Upstream base

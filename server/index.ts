@@ -1556,7 +1556,7 @@ function renderOverviewPage({
         <p class="summary-meta">Active endpoints</p>
       </div>
       <div class="summary-card">
-        <p class="summary-label">Firmware catalog</p>
+        <p class="summary-label">Yealink firmware</p>
         <p class="summary-value">${firmwareCount}</p>
         <p class="summary-meta">Last update: ${escapeHtml(firmwareLastSync)}</p>
       </div>
@@ -1935,8 +1935,8 @@ function renderFirmwarePage({
   const content = `
     <section class="card">
       <div class="card-header">
-        <h2>Firmware catalog</h2>
-        <p class="subhead">Manage firmware files hosted on this server.</p>
+        <h2>Yealink firmware catalog</h2>
+        <p class="subhead">Manage Yealink firmware files hosted on this server.</p>
         <p class="helper">Entries: ${escapeHtml(
           firmwareCount
         )} &bull; Last change: ${escapeHtml(firmwareLastSync)}</p>
@@ -1952,9 +1952,9 @@ function renderFirmwarePage({
         <form method="post" action="/admin/firmware/import" class="form-grid form-grid--tight">
           <button class="button" type="submit"${
             importReady ? "" : " disabled"
-          }>Import firmware catalog</button>
+          }>Import Yealink firmware catalog</button>
         </form>
-        <p class="helper">One-time import downloads firmware into local storage. Leave this page open while it runs.</p>
+        <p class="helper">One-time import downloads Yealink firmware into local storage. Leave this page open while it runs.</p>
       </div>
     </section>
 
@@ -2730,18 +2730,21 @@ app.post("/admin/firmware/import", requireAuth, async (request, response) => {
     const parsed = htmlPages.flatMap((html, index) =>
       parseFirmwareCatalog(html, seedUrls[index] || "")
     );
-    if (!parsed.length) {
+    const yealinkEntries = parsed.filter(
+      (entry) => entry.vendor.toLowerCase() === "yealink"
+    );
+    if (!yealinkEntries.length) {
       response.redirect(
         buildNoticeUrl(
           "/admin/firmware",
           "error",
-          "No firmware entries found."
+          "No Yealink firmware entries found."
         )
       );
       return;
     }
     const unique = new Map<string, FirmwareCatalogInput>();
-    for (const entry of parsed) {
+    for (const entry of yealinkEntries) {
       const key = `${entry.vendor}||${entry.model}||${entry.version}`;
       if (!unique.has(key)) {
         unique.set(key, entry);
@@ -2814,7 +2817,7 @@ app.post("/admin/firmware/import", requireAuth, async (request, response) => {
       buildNoticeUrl(
         "/admin/firmware",
         "notice",
-        `Firmware import complete (${successCount} ok, ${failureCount} failed).`
+        `Yealink firmware import complete (${successCount} ok, ${failureCount} failed).`
       )
     );
   } catch (error) {
